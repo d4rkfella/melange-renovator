@@ -328,6 +328,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", rm.Identifier)
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
@@ -335,10 +336,6 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 	)
-	opts, err := testChromiumSandboxing(ctx, logger, opts...)
-	if err != nil {
-		return versionResult{}, err
-	}
 
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer cancel()
@@ -346,7 +343,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	chromeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	chromeCtx, cancel = context.WithTimeout(chromeCtx, 15*time.Second)
+	chromeCtx, cancel = context.WithTimeout(chromeCtx, 60*time.Second)
 	defer cancel()
 
 	token := os.Getenv("RELEASE_MONITOR_TOKEN")
@@ -402,36 +399,6 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		Version:   winner.Processed,
 		CommitSHA: "",
 	}, nil
-}
-
-func testChromiumSandboxing(ctx context.Context, logger *slog.Logger, opts ...chromedp.ExecAllocatorOption) ([]chromedp.ExecAllocatorOption, error) {
-	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
-	defer cancel()
-	testCtx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	testCtx, cancel = context.WithTimeout(testCtx, 5*time.Second)
-	defer cancel()
-
-	err := chromedp.Run(testCtx, chromedp.Navigate("about:blank"))
-	if err == nil {
-		return opts, nil
-	}
-
-	errStr := err.Error()
-	isSandboxError := strings.Contains(errStr, "sandbox") ||
-		strings.Contains(errStr, "SUID") ||
-		strings.Contains(errStr, "namespace") ||
-		strings.Contains(errStr, "setuid") ||
-		strings.Contains(errStr, "permission denied")
-
-	if !isSandboxError {
-		return nil, err
-	}
-
-	logger.Warn("Chromium could not start with sandbox, likely due to CI/container restrictions; using --no-sandbox as fallback")
-	opts = append(opts, chromedp.Flag("no-sandbox", true))
-
-	return opts, nil
 }
 
 func truncateString(s string, maxLen int) string {
