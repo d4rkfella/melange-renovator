@@ -329,10 +329,12 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("headless", true),
+		chromedp.Flag("headless", "new"),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
+		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		chromedp.WindowSize(1920, 1080),
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 	)
@@ -343,24 +345,33 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	chromeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	chromeCtx, cancel = context.WithTimeout(chromeCtx, 60*time.Second)
+	chromeCtx, cancel = context.WithTimeout(chromeCtx, 90*time.Second)
 	defer cancel()
 
 	token := os.Getenv("RELEASE_MONITOR_TOKEN")
 	headers := map[string]any{
-		"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
 		"Authorization": "Bearer " + token,
+		"Accept":        "application/json",
 	}
 
 	var jsonBody string
-	if err := chromedp.Run(chromeCtx,
+	err := chromedp.Run(chromeCtx,
 		network.Enable(),
 		network.SetExtraHTTPHeaders(network.Headers(headers)),
 		chromedp.Navigate(url),
+		chromedp.Sleep(15*time.Second),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.body.innerText`, &jsonBody),
-	); err != nil {
-		return versionResult{}, fmt.Errorf("failed to fetch project info from release-monitoring.org: %w", err)
+	)
+
+	if err != nil {
+		return versionResult{}, fmt.Errorf("failed to fetch: %w", err)
+	}
+
+	logger.Debug("previewing response", "response_preview", truncateString(jsonBody, 200))
+
+	if strings.Contains(jsonBody, "Access Denied") || strings.Contains(jsonBody, "Making sure you're not a bot") {
+		return versionResult{}, fmt.Errorf("blocked by Anubis: %s", truncateString(jsonBody, 100))
 	}
 
 	var project struct {
@@ -370,7 +381,6 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	}
 
 	if err := json.Unmarshal([]byte(jsonBody), &project); err != nil {
-		logger.Debug("previewing response", "response_preview", truncateString(jsonBody, 200))
 		return versionResult{}, fmt.Errorf("failed to decode response body: %w", err)
 	}
 
@@ -382,7 +392,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 	}
 
 	if len(versions) == 0 {
-		return versionResult{}, fmt.Errorf("no versions found in response from release-monitoring.org")
+		return versionResult{}, fmt.Errorf("no versions found in response")
 	}
 
 	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
