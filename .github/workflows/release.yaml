@@ -66,6 +66,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   build-and-push-image:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     runs-on: ubuntu-24.04
     needs: create-release
     steps:
@@ -112,6 +118,7 @@ jobs:
             type=raw,value=latest
 
       - name: Build and push Docker image
+        id: build-and-push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
