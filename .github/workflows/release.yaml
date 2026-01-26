@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   create-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v.6.0.2
@@ -31,8 +31,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version: '1.25.3'
-      
+          go-version: '1.25'
+
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
@@ -64,3 +64,87 @@ jobs:
             ${{ steps.prev_tag.outputs.prev_tag && format('**Changes since {0}**: https://github.com/{1}/compare/{0}...{2}', steps.prev_tag.outputs.prev_tag, github.repository, inputs.version) || 'Initial release' }}
           generateReleaseNotes: false
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-push-image:
+    runs-on: ubuntu-24.04
+    needs: create-release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v.6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        with:
+          go-version: '1.25'
+
+      - name: Build binaries for all architectures
+        env:
+          CGO_ENABLED: 0
+        run: |
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o melange-renovator-amd64 .
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o melange-renovator-arm64 .
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }}
+            type=semver,pattern={{major}},value=${{ inputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sign Image with Cosign
+        env:
+            COSIGN_EXPERIMENTAL: "true"
+        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@00014ed6ed5efc5b1ab7f7f34a39eb55d41aa4f8 # v3.1.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build-and-push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@62ad5284b8ced813296287a0b63906cb364b73ee # v0.22.0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.build-and-push.outputs.digest }}
+          format: 'spdx-json'
+          output-file: 'sbom.spdx.json'
+
+      - name: Attest sbom
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build-and-push.outputs.digest }}
+          sbom-path: 'sbom.spdx.json'
+          push-to-registry: true
