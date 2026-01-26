@@ -13,6 +13,7 @@ RUN \
     bash \
     ca-certificates \
     tzdata \
+    chromium \
     && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
     && apt-get autoremove -y \
     && apt-get clean
