@@ -43,7 +43,6 @@ jobs:
           name: "Release ${{ inputs.version }}"
           commit: ${{ github.sha }}
           generateReleaseNotes: true
-          generateReleaseNotesPreviousTag: true
           token: ${{ secrets.GITHUB_TOKEN }}
           skipIfReleaseExists: true
 
