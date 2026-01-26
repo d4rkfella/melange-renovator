@@ -329,7 +329,7 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("headless", "new"),
+		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
