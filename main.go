@@ -331,7 +331,6 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 		chromedp.WindowSize(1920, 1080),

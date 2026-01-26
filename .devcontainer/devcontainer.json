@@ -1,9 +1,10 @@
 {
     "name": "Go Development",
-    "image": "mcr.microsoft.com/devcontainers/go:1.25", 
+    "image": "mcr.microsoft.com/devcontainers/go:1.25",
     "features": {
         "ghcr.io/devcontainers/features/git:1": {},
-        "ghcr.io/devcontainers/features/github-cli:1": {}
+        "ghcr.io/devcontainers/features/github-cli:1": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:2.14.0": { "moby": false}
     },
     "forwardPorts": [],
     "customizations": {
@@ -11,7 +12,8 @@
             "extensions": [
                 "golang.go",
                 "ms-azuretools.vscode-docker",
-                "editorconfig.editorconfig"
+                "editorconfig.editorconfig",
+                "ms-azuretools.vscode-containers",
             ],
             "settings": {
                 "go.useLanguageServer": true,
@@ -20,7 +22,9 @@
                 "go.lintOnSave": "package",
                 "go.vetOnSave": "package",
                 "editor.formatOnSave": true,
-                "editor.rulers": [120],
+                "editor.rulers": [
+                    120
+                ],
                 "files.trimTrailingWhitespace": true
             }
         }
