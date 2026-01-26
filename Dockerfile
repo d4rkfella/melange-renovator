@@ -18,11 +18,8 @@ RUN \
     && apt-get autoremove -y \
     && apt-get clean
 
-RUN groupadd -r -g 65532 nonroot \
-    && useradd -r -u 65532 -g nonroot -m -d /home/nonroot -s /usr/sbin/nologin nonroot
-
 COPY --chmod=555 melange-renovator-${TARGETARCH} /usr/local/bin/melange-renovator
 
-USER nonroot:nonroot
+USER 1001
 
 ENTRYPOINT ["/usr/local/bin/melange-renovator"]
