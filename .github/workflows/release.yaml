@@ -33,37 +33,19 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
       - name: Run golangci-lint
-        run: golangci-lint run ./...
-
-      - name: Create annotated tag
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git tag -a "${{ inputs.version }}" -m "Release ${{ inputs.version }}"
-          git push origin "${{ inputs.version }}"
-
-      - name: Get previous tag
-        id: prev_tag
-        run: |
-          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n 2p)
-          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
 
       - name: Create GitHub Release
         uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1.20.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag: "${{ inputs.version }}"
           name: "Release ${{ inputs.version }}"
           commit: ${{ github.sha }}
-          body: |
-            ${{ steps.prev_tag.outputs.prev_tag && format('**Changes since {0}**: https://github.com/{1}/compare/{0}...{2}', steps.prev_tag.outputs.prev_tag, github.repository, inputs.version) || 'Initial release' }}
-          generateReleaseNotes: false
+          generateReleaseNotes: true
+          generateReleaseNotesPreviousTag: true
           token: ${{ secrets.GITHUB_TOKEN }}
+          skipIfReleaseExists: true
 
   build-and-push-image:
     permissions:
@@ -77,6 +59,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v.6.0.2
+        with:
+            ref: ${{ inputs.version }}
 
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
