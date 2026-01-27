@@ -4,7 +4,9 @@
     "features": {
         "ghcr.io/devcontainers/features/git:1": {},
         "ghcr.io/devcontainers/features/github-cli:1": {},
-        "ghcr.io/devcontainers/features/docker-in-docker:2.14.0": { "moby": false}
+        "ghcr.io/devcontainers/features/docker-in-docker:2.14.0": {
+            "moby": false
+        }
     },
     "forwardPorts": [],
     "customizations": {
@@ -13,7 +15,7 @@
                 "golang.go",
                 "ms-azuretools.vscode-docker",
                 "editorconfig.editorconfig",
-                "ms-azuretools.vscode-containers",
+                "ms-azuretools.vscode-containers"
             ],
             "settings": {
                 "go.useLanguageServer": true,

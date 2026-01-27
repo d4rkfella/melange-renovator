@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,7 +22,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
-	"github.com/google/go-github/v79/github"
+	"github.com/google/go-github/v81/github"
 )
 
 type versionResult struct {
@@ -45,18 +46,11 @@ type versionCandidate struct {
 	ApkVer    apk.Version
 }
 
-type versionFilter interface {
-	GetFilterPrefix() string
-	GetFilterContains() string
-	GetStripPrefix() string
-	GetStripSuffix() string
-}
-
-func filterVersion(name string, filter versionFilter, compiledIgnore []*regexp.Regexp, logger *slog.Logger) bool {
-	if p := filter.GetFilterPrefix(); p != "" && !strings.HasPrefix(name, p) {
+func shouldSkipVersion(name string, versionHandler config.VersionHandler, compiledIgnore []*regexp.Regexp, logger *slog.Logger) bool {
+	if p := versionHandler.GetFilterPrefix(); p != "" && !strings.HasPrefix(name, p) {
 		return true
 	}
-	if c := filter.GetFilterContains(); c != "" && !strings.Contains(name, c) {
+	if c := versionHandler.GetFilterContains(); c != "" && !strings.Contains(name, c) {
 		return true
 	}
 
@@ -70,9 +64,9 @@ func filterVersion(name string, filter versionFilter, compiledIgnore []*regexp.R
 	return false
 }
 
-func transformVersion(name string, filter versionFilter, transforms []compiledVersionTransform) string {
-	processed := strings.TrimPrefix(name, filter.GetStripPrefix())
-	processed = strings.TrimSuffix(processed, filter.GetStripSuffix())
+func applyVersionTransforms(versionStr string, versionHandler config.VersionHandler, transforms []compiledVersionTransform) string {
+	processed := strings.TrimPrefix(versionStr, versionHandler.GetStripPrefix())
+	processed = strings.TrimSuffix(processed, versionHandler.GetStripSuffix())
 
 	for _, t := range transforms {
 		processed = t.Re.ReplaceAllString(processed, t.Replace)
@@ -83,7 +77,7 @@ func transformVersion(name string, filter versionFilter, transforms []compiledVe
 
 func findLatestValidVersion(
 	versions []string,
-	filter versionFilter,
+	versionHandler config.VersionHandler,
 	compiledIgnore []*regexp.Regexp,
 	transforms []compiledVersionTransform,
 	logger *slog.Logger,
@@ -91,11 +85,11 @@ func findLatestValidVersion(
 	var winner *versionCandidate
 
 	for _, verStr := range versions {
-		if filterVersion(verStr, filter, compiledIgnore, logger) {
+		if shouldSkipVersion(verStr, versionHandler, compiledIgnore, logger) {
 			continue
 		}
 
-		processed := transformVersion(verStr, filter, transforms)
+		processed := applyVersionTransforms(verStr, versionHandler, transforms)
 
 		ver, err := apk.ParseVersion(processed)
 		if err != nil {
@@ -142,7 +136,7 @@ func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *confi
 		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
 	}
 
-	resolveSHA := func(tagName string) (string, error) {
+	resolveCommitSHA := func(tagName string) (string, error) {
 		ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
 		if err != nil {
 			return "", fmt.Errorf("fetching ref for tag %s: %w", tagName, err)
@@ -172,7 +166,7 @@ func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *confi
 	}
 
 	fetchAndReturn := func(winner *versionCandidate) (versionResult, error) {
-		sha, err := resolveSHA(winner.Original)
+		sha, err := resolveCommitSHA(winner.Original)
 		if err != nil {
 			return versionResult{}, err
 		}
@@ -525,7 +519,13 @@ func run(ctx context.Context, logger *slog.Logger, filePath string) error {
 	}
 
 	if !cfg.Update.Enabled {
-		logger.Info("updates disabled, skipping", "package", cfg.Package.Name)
+		reason := cfg.Update.ExcludeReason
+		if reason == "" {
+			reason = "N/A"
+		}
+		logger.Info("updates disabled, skipping",
+			"package", cfg.Package.Name,
+			"reason", reason)
 		return nil
 	}
 
@@ -576,18 +576,44 @@ func run(ctx context.Context, logger *slog.Logger, filePath string) error {
 }
 
 func main() {
+	logLevelFlag := flag.String("log-level", "", "Log level (debug, info, warn, error)")
+	flag.Parse()
+
+	logLevelStr := *logLevelFlag
+	if logLevelStr == "" {
+		logLevelStr = os.Getenv("LOG_LEVEL")
+	}
+	if logLevelStr == "" {
+		logLevelStr = "info"
+	}
+
+	var logLevel slog.Level
+	switch strings.ToLower(logLevelStr) {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+		logLevel = slog.LevelInfo
+	case "warn", "warning":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		fmt.Fprintf(os.Stderr, "invalid log level %q, using INFO\n", logLevelStr)
+		logLevel = slog.LevelInfo
+	}
+
 	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	})
 	logger := slog.New(handler)
-
 	slog.SetDefault(logger)
 
-	if len(os.Args) < 2 {
+	if flag.NArg() < 1 {
 		logger.Error("missing argument", "error", "please provide a valid Melange config file path")
+		flag.Usage()
 		os.Exit(1)
 	}
-	filePath := os.Args[1]
+	filePath := flag.Arg(0)
 
 	ctx := context.Background()
 	if err := run(ctx, logger, filePath); err != nil {

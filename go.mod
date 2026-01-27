@@ -1,6 +1,6 @@
 module github.com/d4rkfella/melange-renovator/v2
 
-go 1.25.3
+go 1.25.5
 
 require (
 	chainguard.dev/apko v1.0.5
@@ -8,7 +8,7 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/go-git/go-git/v5 v5.16.4
-	github.com/google/go-github/v79 v79.0.0
+	github.com/google/go-github/v81 v81.0.0
 )
 
 require (
