@@ -7,7 +7,7 @@ require (
 	chainguard.dev/melange v0.41.1
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
-	github.com/go-git/go-git/v5 v5.16.4
+	github.com/go-git/go-git/v5 v5.16.5
 	github.com/google/go-github/v81 v81.0.0
 )
 
