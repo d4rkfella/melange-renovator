@@ -3,8 +3,8 @@ module github.com/d4rkfella/melange-renovator/v2
 go 1.25.5
 
 require (
-	chainguard.dev/apko v1.1.9
-	chainguard.dev/melange v0.43.1
+	chainguard.dev/apko v1.1.10
+	chainguard.dev/melange v0.43.2
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/go-git/go-git/v5 v5.16.5
@@ -94,7 +94,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.40.0 // indirect
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
-	go.step.sm/crypto v0.76.0 // indirect
+	go.step.sm/crypto v0.76.2 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.49.0 // indirect
