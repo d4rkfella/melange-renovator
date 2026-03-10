@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	chainguard.dev/apko v1.1.13
-	chainguard.dev/melange v0.43.7
+	chainguard.dev/melange v0.45.1
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2
 	github.com/go-git/go-git/v5 v5.17.0
