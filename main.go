@@ -682,7 +682,11 @@ func ensurePR(
 					continue
 				}
 				log.Info("Closing outdated PR", "number", pr.GetNumber())
-				gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{State: github.Ptr("closed")})
+				if _, _, err := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
+					State: github.Ptr("closed"),
+				}); err != nil {
+					log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", err)
+				}
 			}
 		}
 	}
