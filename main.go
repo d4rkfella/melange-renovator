@@ -643,8 +643,18 @@ func ensurePR(
 	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
 	var existingFile *github.RepositoryContent
 
+	log.Debug("Checking for branch existence")
 	_, resp, err := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
 	branchExists := (err == nil)
+
+	branchPRs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
+		State: "open",
+		Head:  fmt.Sprintf("%s:%s", owner, prBranch),
+	})
+	if err != nil {
+		return fmt.Errorf("checking for existing branch PRs: %w", err)
+	}
+	prExists := len(branchPRs) > 0
 
 	if branchExists {
 		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
@@ -652,22 +662,24 @@ func ensurePR(
 		if err == nil {
 			existingFile = remoteFile
 			remoteContent, _ := remoteFile.GetContent()
-			if remoteContent == string(content) {
-				log.Info("Content already matches branch, nothing to do")
+
+			if remoteContent == string(content) && prExists {
+				log.Info("Content already matches branch and PR is open, nothing to do")
 				return nil
 			}
 		}
+
 		if sequential {
 			log.Info("Sequential mode: branch exists, skipping update")
 			return nil
 		}
 	} else if resp != nil && resp.StatusCode != 404 {
-		return fmt.Errorf("fetching branch info (status %d): %w", resp.StatusCode, err)
+		return fmt.Errorf("github api error fetching branch info (status %d): %w", resp.StatusCode, err)
 	}
 
 	prs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
 	if err != nil {
-		return fmt.Errorf("listing PRs: %w", err)
+		return fmt.Errorf("listing all open PRs: %w", err)
 	}
 
 	for _, pr := range prs {
@@ -712,15 +724,16 @@ func ensurePR(
 			Ref: "refs/heads/" + prBranch,
 			SHA: headSHA,
 		})
-		if err != nil && !strings.Contains(err.Error(), "422") {
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("creating branch: %w", err)
 		}
 
-		existingFile, _, _, err = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
 			&github.RepositoryContentGetOptions{Ref: prBranch})
 		if err != nil {
-			return fmt.Errorf("fetching file info from branch: %w", err)
+			return fmt.Errorf("fetching file info from new branch: %w", err)
 		}
+		existingFile = remoteFile
 	}
 
 	_, _, err = gh.Repositories.UpdateFile(ctx, owner, repo, fileAPIPath,
@@ -729,21 +742,12 @@ func ensurePR(
 			Content: content,
 			SHA:     existingFile.SHA,
 			Branch:  github.Ptr(prBranch),
-			Author: &github.CommitAuthor{
-				Name:  github.Ptr("melange-renovator"),
-				Email: github.Ptr("melange-renovator@users.noreply.github.com"),
-			},
 		})
 	if err != nil {
 		return fmt.Errorf("updating file: %w", err)
 	}
 
-	branchPRs, _, _ := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
-		State: "open",
-		Head:  fmt.Sprintf("%s:%s", owner, prBranch),
-	})
-
-	if len(branchPRs) == 0 {
+	if !prExists {
 		newPR, _, err := gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
 			Title: github.Ptr(prTitle),
 			Body:  github.Ptr(prBody),
@@ -760,7 +764,7 @@ func ensurePR(
 			log.Warn("Failed to add labels", "error", err)
 		}
 
-		log.Info("PR created", "url", newPR.GetHTMLURL())
+		log.Info("PR is ready!", "url", newPR.GetHTMLURL())
 	}
 
 	return nil
