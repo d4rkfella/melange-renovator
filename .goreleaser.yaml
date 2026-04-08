@@ -1,0 +1,64 @@
+version: 2
+project_name: melange-renovator
+
+builds:
+  - id: melange-build
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commitSHA={{.Commit}} -X main.buildDate={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.spdx.json"
+    args: ["$artifact", "--output", "spdx-json=$document"]
+
+checksum:
+  name_template: "{{ .ProjectName }}_checksums.txt"
+
+signs:
+  - artifacts: checksum
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ['^docs:', '^test:']
+
+dockers_v2:
+  - ids:
+      - melange-build
+    images:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"
+    tags:
+      - "v{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    flags:
+      - "--provenance=true"
+
+docker_signs:
+  - artifacts: all
+    cmd: cosign
+    args:
+      - "sign"
+      - "--upload=true"
+      - "${artifact}@${digest}"
+      - "--yes"
