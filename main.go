@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/chainguard-dev/clog"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/go-git/go-git/v5"
@@ -77,25 +78,32 @@ type versionCandidate struct {
 	ApkVer      apk.Version
 }
 
+type compiledPatterns struct {
+	IgnorePatterns    []*regexp.Regexp
+	VersionTransforms []compiledVersionTransform
+}
+
 var (
 	version   = "dev"
 	commitSHA = "unknown"
 	buildDate = "unknown"
 )
 
-func shouldSkipVersion(tag string, versionHandler config.VersionHandler, compiledIgnore []*regexp.Regexp, logger *slog.Logger) bool {
+func shouldSkipVersion(ctx context.Context, tag string, versionHandler config.VersionHandler, compiledIgnore []*regexp.Regexp) bool {
+	log := clog.FromContext(ctx)
+
 	if p := versionHandler.GetFilterPrefix(); p != "" && !strings.HasPrefix(tag, p) {
-		logger.Debug("Version skipped: does not match tag-filter-prefix", "tag", tag, "tag-filter-prefix", p)
+		log.Debug("Version skipped: does not match tag-filter-prefix", "tag", tag, "tag-filter-prefix", p)
 		return true
 	}
 	if c := versionHandler.GetFilterContains(); c != "" && !strings.Contains(tag, c) {
-		logger.Debug("Version skipped: does not match tag-filter-contains", "tag", tag, "tag-filter-contains", c)
+		log.Debug("Version skipped: does not match tag-filter-contains", "tag", tag, "tag-filter-contains", c)
 		return true
 	}
 
 	for _, re := range compiledIgnore {
 		if re.MatchString(tag) {
-			logger.Debug("Version skipped: matched ignore-regex-patterns entry", "tag", tag, "pattern", re.String())
+			log.Debug("Version skipped: matched ignore-regex-patterns entry", "tag", tag, "pattern", re.String())
 			return true
 		}
 	}
@@ -115,33 +123,33 @@ func applyVersionTransforms(upstream string, versionHandler config.VersionHandle
 }
 
 func resolveLatestVersion(
+	ctx context.Context,
 	versions []string,
 	versionHandler config.VersionHandler,
-	compiledIgnore []*regexp.Regexp,
-	transforms []compiledVersionTransform,
-	logger *slog.Logger,
+	patterns compiledPatterns,
 ) (*versionCandidate, error) {
+	log := clog.FromContext(ctx)
 	var best *versionCandidate
 
 	for _, upstream := range versions {
-		if shouldSkipVersion(upstream, versionHandler, compiledIgnore, logger) {
+		if shouldSkipVersion(ctx, upstream, versionHandler, patterns.IgnorePatterns) {
 			continue
 		}
 
-		transformed := applyVersionTransforms(upstream, versionHandler, transforms)
+		transformed := applyVersionTransforms(upstream, versionHandler, patterns.VersionTransforms)
 		if transformed != upstream {
-			logger.Debug("Version transform applied", "upstream", upstream, "transformed", transformed)
+			log.Debug("Version transform applied", "upstream", upstream, "transformed", transformed)
 		}
 
 		ver, err := apk.ParseVersion(transformed)
 		if err != nil {
 			if transformed != upstream {
-				logger.Warn("Version skipped: APK version parsing failed after transform — check your version-transform regex",
+				log.Warn("Version skipped: APK version parsing failed after transform — check your version-transform regex",
 					"upstream", upstream,
 					"transformed", transformed,
 					"error", err)
 			} else {
-				logger.Debug("Version skipped: not a valid APK version", "upstream", upstream, "error", err)
+				log.Debug("Version skipped: not a valid APK version", "upstream", upstream, "error", err)
 			}
 			continue
 		}
@@ -160,15 +168,15 @@ func resolveLatestVersion(
 	}
 
 	if best.Upstream != best.Transformed {
-		logger.Debug("Resolved version string used for comparison", "tag", best.Transformed)
+		log.Debug("Resolved version string used for comparison", "tag", best.Transformed)
 	} else {
-		logger.Debug("Resolved version string used for comparison", "tag", best.Upstream)
+		log.Debug("Resolved version string used for comparison", "tag", best.Upstream)
 	}
 
 	return best, nil
 }
 
-func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, melangeTransforms []compiledVersionTransform) (versionResult, error) {
+func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
 	gh := cfg.Update.GitHubMonitor
 	parts := strings.Split(gh.Identifier, "/")
 	if len(parts) != 2 {
@@ -183,110 +191,101 @@ func getLatestGitHubVersion(ctx context.Context, logger *slog.Logger, cfg *confi
 
 	opts := &github.ListOptions{PerPage: 100}
 
-	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
-	if err != nil {
-		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
-	}
-
-	resolveCommitSHA := func(tagName string) (string, error) {
-		ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+tagName)
-		if err != nil {
-			return "", fmt.Errorf("fetching ref for tag %s: %w", tagName, err)
-		}
-		if ref.Object == nil {
-			return "", fmt.Errorf("ref object missing for tag %s", tagName)
-		}
-
-		switch ref.Object.GetType() {
-		case "commit":
-			return ref.Object.GetSHA(), nil
-		case "tag":
-			tagObj, _, err := client.Git.GetTag(ctx, owner, repo, ref.Object.GetSHA())
-			if err != nil {
-				return "", fmt.Errorf("resolving annotated tag %s: %w", tagName, err)
-			}
-			if tagObj.Object != nil {
-				return tagObj.Object.GetSHA(), nil
-			}
-		}
-
-		return "", fmt.Errorf("unable to resolve SHA for tag %s", tagName)
-	}
-
-	fetchAndReturn := func(best *versionCandidate) (versionResult, error) {
-		sha, err := resolveCommitSHA(best.Upstream)
-		if err != nil {
-			return versionResult{}, err
-		}
-		return versionResult{
-			Version:   best.Transformed,
-			CommitSHA: sha,
-		}, nil
-	}
-
 	if gh.UseTags {
+		type tagEntry struct {
+			name string
+			sha  string
+		}
+		var allTags []tagEntry
+
 		for {
 			tags, resp, err := client.Repositories.ListTags(ctx, owner, repo, opts)
 			if err != nil {
 				return versionResult{}, fmt.Errorf("listing tags: %w", err)
 			}
-
-			if len(tags) == 0 {
-				return versionResult{}, fmt.Errorf("no tags found for GitHub repository %s/%s", owner, repo)
+			for _, t := range tags {
+				allTags = append(allTags, tagEntry{name: t.GetName(), sha: t.GetCommit().GetSHA()})
 			}
-
-			tagNames := make([]string, len(tags))
-			for i := range tags {
-				tagNames[i] = tags[i].GetName()
-			}
-
-			best, err := resolveLatestVersion(tagNames, gh, compiledIgnore, melangeTransforms, logger)
-			if err == nil && best != nil {
-				return fetchAndReturn(best)
-			}
-
 			if resp.NextPage == 0 {
 				break
 			}
 			opts.Page = resp.NextPage
 		}
 
-		return versionResult{}, fmt.Errorf("no valid tags found for %s/%s", owner, repo)
+		if len(allTags) == 0 {
+			return versionResult{}, fmt.Errorf("no tags found for GitHub repository %s/%s", owner, repo)
+		}
+
+		tagNames := make([]string, len(allTags))
+		for i, t := range allTags {
+			tagNames[i] = t.name
+		}
+
+		best, err := resolveLatestVersion(ctx, tagNames, gh, patterns)
+		if err != nil {
+			return versionResult{}, fmt.Errorf("no valid tags found for %s/%s: %w", owner, repo, err)
+		}
+
+		for _, t := range allTags {
+			if t.name == best.Upstream {
+				return versionResult{Version: best.Transformed, CommitSHA: t.sha}, nil
+			}
+		}
+		return versionResult{}, fmt.Errorf("failed to resolve SHA for tag %s", best.Upstream)
 	}
+
+	var allTagNames []string
 
 	for {
 		releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
 		if err != nil {
 			return versionResult{}, fmt.Errorf("listing releases: %w", err)
 		}
-
-		if len(releases) == 0 {
-			return versionResult{}, fmt.Errorf("no releases found for GitHub repository %s/%s", owner, repo)
-		}
-
-		tagNames := make([]string, 0, len(releases))
 		for _, r := range releases {
 			if !cfg.Update.EnablePreReleaseTags && r.GetPrerelease() {
 				continue
 			}
-			tagNames = append(tagNames, r.GetTagName())
+			allTagNames = append(allTagNames, r.GetTagName())
 		}
-
-		best, err := resolveLatestVersion(tagNames, gh, compiledIgnore, melangeTransforms, logger)
-		if err == nil && best != nil {
-			return fetchAndReturn(best)
-		}
-
 		if resp.NextPage == 0 {
 			break
 		}
 		opts.Page = resp.NextPage
 	}
 
-	return versionResult{}, fmt.Errorf("no valid versions found for %s/%s", owner, repo)
+	if len(allTagNames) == 0 {
+		return versionResult{}, fmt.Errorf("no releases found for GitHub repository %s/%s", owner, repo)
+	}
+
+	best, err := resolveLatestVersion(ctx, allTagNames, gh, patterns)
+	if err != nil {
+		return versionResult{}, fmt.Errorf("no valid versions found for %s/%s: %w", owner, repo, err)
+	}
+
+	ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+best.Upstream)
+	if err != nil {
+		return versionResult{}, fmt.Errorf("fetching ref for tag %s: %w", best.Upstream, err)
+	}
+	if ref.Object == nil {
+		return versionResult{}, fmt.Errorf("ref object missing for tag %s", best.Upstream)
+	}
+
+	sha := ref.Object.GetSHA()
+	if ref.Object.GetType() == "tag" {
+		tagObj, _, err := client.Git.GetTag(ctx, owner, repo, sha)
+		if err != nil {
+			return versionResult{}, fmt.Errorf("resolving annotated tag %s: %w", best.Upstream, err)
+		}
+		if tagObj.Object != nil {
+			sha = tagObj.Object.GetSHA()
+		}
+	}
+
+	return versionResult{Version: best.Transformed, CommitSHA: sha}, nil
 }
 
-func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, transforms []compiledVersionTransform) (versionResult, error) {
+func getLatestGitVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
+	log := clog.FromContext(ctx)
 	gitMonitor := cfg.Update.GitMonitor
 
 	repoURL := ""
@@ -301,7 +300,7 @@ func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.C
 	if repoURL == "" {
 		return versionResult{}, fmt.Errorf("no git-checkout step found in pipeline")
 	}
-	logger.Debug("Using git repository", "repo", repoURL)
+	log.Debug("Queried git repository", "repo", repoURL)
 
 	storage := memory.NewStorage()
 	rem := git.NewRemote(storage, &gitconfig.RemoteConfig{
@@ -321,26 +320,21 @@ func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.C
 				Name: ref.Name().Short(),
 				Hash: ref.Hash(),
 			})
-			logger.Debug("Found remote tag", "tag", ref.Name().Short())
+			log.Debug("Found remote tag", "tag", ref.Name().Short())
 		}
 	}
 	if len(rawTags) == 0 {
 		return versionResult{}, fmt.Errorf("no tags found in repository %s", repoURL)
 	}
 
-	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
-	if err != nil {
-		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
-	}
-
 	tagNames := make([]string, len(rawTags))
-	tagHashMap := make(map[string]plumbing.Hash)
+	tagHashMap := make(map[string]plumbing.Hash, len(rawTags))
 	for i, t := range rawTags {
 		tagNames[i] = t.Name
 		tagHashMap[t.Name] = t.Hash
 	}
 
-	best, err := resolveLatestVersion(tagNames, gitMonitor, compiledIgnore, transforms, logger)
+	best, err := resolveLatestVersion(ctx, tagNames, gitMonitor, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
@@ -354,26 +348,24 @@ func getLatestGitVersion(ctx context.Context, logger *slog.Logger, cfg *config.C
 	}
 
 	upstreamHash := tagHashMap[best.Upstream]
-	commitSHA := ""
+	resolvedSHA := ""
 	if tagObj, err := object.GetTag(storage, upstreamHash); err == nil {
 		if commitObj, err := object.GetCommit(storage, tagObj.Target); err == nil {
-			commitSHA = commitObj.Hash.String()
+			resolvedSHA = commitObj.Hash.String()
 		}
 	} else if commitObj, err := object.GetCommit(storage, upstreamHash); err == nil {
-		commitSHA = commitObj.Hash.String()
+		resolvedSHA = commitObj.Hash.String()
 	}
 
-	if commitSHA == "" {
+	if resolvedSHA == "" {
 		return versionResult{}, fmt.Errorf("failed to resolve commit for tag %s", best.Upstream)
 	}
 
-	return versionResult{
-		Version:   best.Transformed,
-		CommitSHA: commitSHA,
-	}, nil
+	return versionResult{Version: best.Transformed, CommitSHA: resolvedSHA}, nil
 }
 
-func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, transforms []compiledVersionTransform) (versionResult, error) {
+func getLatestReleaseMonitorVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
+	log := clog.FromContext(ctx)
 	rm := cfg.Update.ReleaseMonitor
 	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", rm.Identifier)
 
@@ -412,12 +404,11 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Evaluate(`document.body.innerText`, &jsonBody),
 	)
-
 	if err != nil {
 		return versionResult{}, fmt.Errorf("failed to fetch: %w", err)
 	}
 
-	logger.Debug("Previewing response", "response_preview", truncateString(jsonBody, 200))
+	log.Debug("previewing response", "response_preview", truncateString(jsonBody, 200))
 
 	if strings.Contains(jsonBody, "Access Denied") || strings.Contains(jsonBody, "Making sure you're not a bot") {
 		return versionResult{}, fmt.Errorf("blocked by Anubis: %s", truncateString(jsonBody, 100))
@@ -428,15 +419,12 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		Versions       []string `json:"versions"`
 		StableVersions []string `json:"stable_versions"`
 	}
-
 	if err := json.Unmarshal([]byte(jsonBody), &project); err != nil {
 		return versionResult{}, fmt.Errorf("failed to decode response body: %w", err)
 	}
 
-	var versions []string
-	if !cfg.Update.EnablePreReleaseTags {
-		versions = project.StableVersions
-	} else {
+	versions := project.StableVersions
+	if cfg.Update.EnablePreReleaseTags {
 		versions = project.Versions
 	}
 
@@ -444,23 +432,15 @@ func getLatestReleaseMonitorVersion(ctx context.Context, logger *slog.Logger, cf
 		return versionResult{}, fmt.Errorf("no versions found in release-monitor response for project %d", rm.Identifier)
 	}
 
-	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
-	if err != nil {
-		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
-	}
-
-	best, err := resolveLatestVersion(versions, rm, compiledIgnore, transforms, logger)
+	best, err := resolveLatestVersion(ctx, versions, rm, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
 
-	return versionResult{
-		Version:   best.Transformed,
-		CommitSHA: "",
-	}, nil
+	return versionResult{Version: best.Transformed}, nil
 }
 
-func getLatestOCIVersion(ctx context.Context, logger *slog.Logger, cfg *config.Configuration, transforms []compiledVersionTransform) (versionResult, error) {
+func getLatestOCIVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
 	oci := cfg.Update.OCIMonitor
 
 	repo, err := name.NewRepository(oci.Identifier)
@@ -477,20 +457,12 @@ func getLatestOCIVersion(ctx context.Context, logger *slog.Logger, cfg *config.C
 		return versionResult{}, fmt.Errorf("no tags found for OCI image %s", oci.Identifier)
 	}
 
-	compiledIgnore, err := compileIgnorePatterns(cfg.Update.IgnoreRegexPatterns)
-	if err != nil {
-		return versionResult{}, fmt.Errorf("compiling ignore patterns: %w", err)
-	}
-
-	best, err := resolveLatestVersion(tags, oci, compiledIgnore, transforms, logger)
+	best, err := resolveLatestVersion(ctx, tags, oci, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
 
-	return versionResult{
-		Version:   best.Transformed,
-		CommitSHA: "",
-	}, nil
+	return versionResult{Version: best.Transformed}, nil
 }
 
 func truncateString(s string, maxLen int) string {
@@ -500,56 +472,54 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "... (truncated)"
 }
 
-func compileIgnorePatterns(patterns []string) ([]*regexp.Regexp, error) {
-	compiled := make([]*regexp.Regexp, 0, len(patterns))
-	for _, p := range patterns {
+func compilePatterns(cfg *config.Configuration) (compiledPatterns, error) {
+	ignorePatterns := make([]*regexp.Regexp, 0, len(cfg.Update.IgnoreRegexPatterns))
+	for _, p := range cfg.Update.IgnoreRegexPatterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			return nil, fmt.Errorf("invalid ignore pattern regex %q: %w", p, err)
+			return compiledPatterns{}, fmt.Errorf("invalid ignore pattern regex %q: %w", p, err)
 		}
-		compiled = append(compiled, re)
+		ignorePatterns = append(ignorePatterns, re)
 	}
-	return compiled, nil
-}
 
-func compileVersionTransforms(vts []config.VersionTransform) ([]compiledVersionTransform, error) {
-	out := make([]compiledVersionTransform, 0, len(vts))
-	for _, t := range vts {
+	transforms := make([]compiledVersionTransform, 0, len(cfg.Update.VersionTransform))
+	for _, t := range cfg.Update.VersionTransform {
 		re, err := regexp.Compile(t.Match)
 		if err != nil {
-			return nil, fmt.Errorf("invalid version transform regex %q: %w", t.Match, err)
+			return compiledPatterns{}, fmt.Errorf("invalid version transform regex %q: %w", t.Match, err)
 		}
-		out = append(out, compiledVersionTransform{
-			Re:      re,
-			Replace: t.Replace,
-		})
+		transforms = append(transforms, compiledVersionTransform{Re: re, Replace: t.Replace})
 	}
-	return out, nil
+
+	return compiledPatterns{IgnorePatterns: ignorePatterns, VersionTransforms: transforms}, nil
 }
 
-func compareVersions(logger *slog.Logger, currentStr, latestStr string) int {
+func compareVersions(ctx context.Context, currentStr, latestStr string) int {
+	log := clog.FromContext(ctx)
+
 	current, err := apk.ParseVersion(currentStr)
 	if err != nil {
-		logger.Warn("Failed to parse current version", "tag", currentStr, "error", err)
+		log.Warn("failed to parse current version", "tag", currentStr, "error", err)
 		return -1
 	}
 
 	latest, err := apk.ParseVersion(latestStr)
 	if err != nil {
-		logger.Warn("Failed to parse resolved version", "tag", latestStr, "error", err)
+		log.Warn("failed to parse resolved version", "tag", latestStr, "error", err)
 		return 1
 	}
 	return apk.CompareVersions(current, latest)
 }
 
-func persistState(ctx context.Context, log *slog.Logger, s3Client *s3.Client, bucket, stateKey string, pkgState packageState, result versionResult, updated bool) {
+func persistState(ctx context.Context, s3Client *s3.Client, bucket, stateKey string, pkgState packageState, result versionResult, updated bool) {
+	log := clog.FromContext(ctx)
 	pkgState.LastChecked = time.Now()
 	if updated {
 		pkgState.LastVersion = result.Version
 	}
 
 	if err := savePackageState(ctx, s3Client, bucket, stateKey, pkgState); err != nil {
-		log.Warn("Failed to persist package state to S3",
+		log.Warn("failed to persist package state to S3",
 			"bucket", bucket,
 			"key", stateKey,
 			"error", err,
@@ -557,25 +527,23 @@ func persistState(ctx context.Context, log *slog.Logger, s3Client *s3.Client, bu
 	}
 }
 
-func loadPackageState(ctx context.Context, logger *slog.Logger, client *s3.Client, bucket, key string) (packageState, error) {
+func loadPackageState(ctx context.Context, client *s3.Client, bucket, key string) (packageState, error) {
+	log := clog.FromContext(ctx)
+
 	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	})
-
 	if err != nil {
 		if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 			if apiErr.ErrorCode() == "NoSuchKey" {
-				logger.Debug("No existing state found in S3, initializing new state", "key", key)
+				log.Debug("no existing state found in S3, initializing new state", "key", key)
 				return packageState{}, nil
 			}
 		}
 		return packageState{}, fmt.Errorf("fetching state from S3: %w", err)
 	}
-
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	var ps packageState
 	if err := json.NewDecoder(resp.Body).Decode(&ps); err != nil {
@@ -620,20 +588,15 @@ func shouldRunSchedule(s *config.Schedule, lastChecked time.Time) bool {
 
 func ensurePR(
 	ctx context.Context,
-	logger *slog.Logger,
 	gh *github.Client,
 	owner, repo string,
 	filePath string,
-	pkgName, newVersion string,
+	pkgName string,
 	prBranch, prTitle, prBody string,
 	sequential bool,
 	dryRun bool,
 ) error {
-	log := logger.With(
-		"package", pkgName,
-		"version", newVersion,
-		"branch", prBranch,
-	)
+	log := clog.FromContext(ctx)
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -643,7 +606,7 @@ func ensurePR(
 	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
 	var existingFile *github.RepositoryContent
 
-	log.Debug("Checking for branch existence")
+	log.Debug("checking for branch existence")
 	_, resp, err := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
 	branchExists := (err == nil)
 
@@ -664,7 +627,7 @@ func ensurePR(
 			remoteContent, _ := remoteFile.GetContent()
 
 			if remoteContent == string(content) && prExists {
-				log.Info("Content already matches branch and PR is open, nothing to do")
+				log.Info("content already matches branch and PR is open, nothing to do")
 				return nil
 			}
 		}
@@ -685,15 +648,15 @@ func ensurePR(
 	for _, pr := range prs {
 		if strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
 			if sequential {
-				log.Info("Open PR exists for package, skipping (sequential)")
+				log.Info("open PR exists for package, skipping (sequential)")
 				return nil
 			}
 			if pr.GetTitle() != prTitle {
 				if dryRun {
-					log.Info("DRY RUN: would close outdated PR", "number", pr.GetNumber())
+					log.Info("DRY RUN: would close superseded PR", "number", pr.GetNumber())
 					continue
 				}
-				log.Info("Closing outdated PR", "number", pr.GetNumber())
+				log.Info("closing superseded PR", "number", pr.GetNumber())
 				if _, _, err := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
 					State: github.Ptr("closed"),
 				}); err != nil {
@@ -761,7 +724,7 @@ func ensurePR(
 		labels := []string{"automated pr", "request-version-update"}
 		_, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(), labels)
 		if err != nil {
-			log.Warn("Failed to add labels", "error", err)
+			log.Warn("failed to add labels", "error", err)
 		}
 
 		log.Info("PR is ready!", "url", newPR.GetHTMLURL())
@@ -788,36 +751,65 @@ func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit stri
 	return nil
 }
 
-func discoverConfigs(ctx context.Context, logger *slog.Logger) ([]discoveredConfig, error) {
+func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
+	log := clog.FromContext(ctx)
 	var found []discoveredConfig
-	cwd, _ := os.Getwd()
 
-	err := filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			if d.IsDir() && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules") {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	err = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			log.Warn("Directory walk error", "path", path, "error", err)
+			return nil
+		}
+
+		name := d.Name()
+
+		if d.IsDir() {
+			if strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if strings.HasSuffix(path, ".yaml") || strings.HasSuffix(path, ".yml") {
-			cfg, err := config.ParseConfiguration(ctx, path)
-			if err == nil {
-				if !cfg.Update.Enabled {
-					logger.Debug("Skipping config: updates disabled", "package_name", cfg.Package.Name, "path", path)
-					return nil
-				}
-				found = append(found, discoveredConfig{Path: path, Config: cfg})
-			}
+		if strings.HasPrefix(name, ".") {
+			return nil
 		}
+
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			return nil
+		}
+
+		cfg, err := config.ParseConfiguration(ctx, path)
+		if err != nil {
+			log.Warn("Failed to parse as valid melange configuration", "path", path, "error", err)
+			return nil
+		}
+
+		if !cfg.Update.Enabled {
+			log.Debug("Skipping config: updates are disabled/not configured",
+				"path", path,
+			)
+			return nil
+		}
+
+		found = append(found, discoveredConfig{
+			Path:   path,
+			Config: cfg,
+		})
+
 		return nil
 	})
+
 	return found, err
 }
 
 func main() {
 	logLevelFlag := flag.String("log-level", "info", "Log level")
-	dryRunFlag := flag.Bool("dry-run", false, "Do not perform updates or S3 writes")
+	dryRunFlag := flag.Bool("dry-run", false, "Saves PR metadata to a local file if a new PR is to be opened and skips the schedule logic dependant on the S3 backend.")
 	concurrencyFlag := flag.Int("concurrency", 5, "Number of parallel workers")
 
 	s3BucketFlag := flag.String("s3-bucket", "", "AWS S3 bucket for state")
@@ -832,40 +824,37 @@ func main() {
 	if err := logLevel.UnmarshalText([]byte(*logLevelFlag)); err != nil {
 		logLevel = slog.LevelInfo
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
-	logger.Info("Starting melange-renovator", "version", version, "commit", commitSHA, "build_date", buildDate)
-	logger.Info("Runtime Environment",
-		"GOOS", runtime.GOOS,
-		"GOARCH", runtime.GOARCH,
-		"GoVersion", runtime.Version(),
-	)
+	logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	ctx := clog.WithLogger(context.Background(), logger)
+	log := clog.FromContext(ctx)
+
+	log.Info("Starting melange-renovator", "version", version, "commit", commitSHA, "build_date", buildDate)
+	log.Info("Runtime Environment", "GOOS", runtime.GOOS, "GOARCH", runtime.GOARCH, "GoVersion", runtime.Version())
 
 	if !*dryRunFlag {
 		if *s3BucketFlag == "" {
-			logger.Error("S3 bucket is required in non-dry-run mode", "hint", "set -s3-bucket or use -dry-run")
+			log.Error("S3 bucket is required in non-dry-run mode", "hint", "set -s3-bucket or use -dry-run")
 			os.Exit(1)
 		}
 		if os.Getenv("GITHUB_TOKEN") == "" {
-			logger.Error("GITHUB_TOKEN is required in non-dry-run mode", "hint", "set GITHUB_TOKEN or use -dry-run")
+			log.Error("GITHUB_TOKEN is required in non-dry-run mode", "hint", "set GITHUB_TOKEN or use -dry-run")
 			os.Exit(1)
 		}
 		if os.Getenv("GITHUB_REPOSITORY") == "" {
-			logger.Error("GITHUB_REPOSITORY is required in non-dry-run mode", "hint", "set GITHUB_REPOSITORY or use -dry-run")
+			log.Error("GITHUB_REPOSITORY is required in non-dry-run mode", "hint", "set GITHUB_REPOSITORY or use -dry-run")
 			os.Exit(1)
 		}
 	}
 
-	ctx := context.Background()
-
-	discoveredConfigs, err := discoverConfigs(ctx, logger)
+	discoveredConfigs, err := discoverConfigs(ctx)
 	if err != nil {
-		logger.Error("Failed during auto-discovery", "error", err)
+		log.Error("Melange-renovator failed during auto-discovery", "error", err)
 		os.Exit(1)
 	}
 
 	if len(discoveredConfigs) == 0 {
-		logger.Warn("No melange configs were discovered in the current working directory")
+		log.Warn("No valid melange configs were discovered in the current working directory")
 		os.Exit(0)
 	}
 
@@ -885,9 +874,8 @@ func main() {
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			l := logger.With("config", item.Path)
-			if err := run(ctx, l, item.Path, item.Config, *dryRunFlag, awsOpts); err != nil {
-				l.Error("config processing failed", "error", err)
+			if err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts); err != nil {
+				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				atomic.AddInt64(&failureCount, 1)
 				return nil
 			}
@@ -897,23 +885,28 @@ func main() {
 	}
 
 	if err := g.Wait(); err != nil {
-		logger.Error("Renovate execution halted due to a fatal error", "error", err)
+		log.Error("Melange-renovator execution halted due to a fatal error", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("Renovate finished",
+	log.Info("Melange-renovator finished processing all discovered config files",
 		"total", len(discoveredConfigs),
 		"succeeded", atomic.LoadInt64(&successCount),
 		"failed", atomic.LoadInt64(&failureCount),
 	)
 }
 
-func run(ctx context.Context, logger *slog.Logger, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) error {
-	log := logger.With("package_name", cfg.Package.Name, "current_version", cfg.Package.Version)
+func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) error {
+	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
+		"package_name", cfg.Package.Name,
+		"current_version", cfg.Package.Version,
+		"config_path", filePath,
+	))
+	log := clog.FromContext(ctx)
 
-	if !cfg.Update.Enabled {
-		log.Debug("Updates disabled for package, skipping")
-		return nil
+	patterns, err := compilePatterns(cfg)
+	if err != nil {
+		return fmt.Errorf("compiling patterns: %w", err)
 	}
 
 	var s3Client *s3.Client
@@ -941,35 +934,31 @@ func run(ctx context.Context, logger *slog.Logger, filePath string, cfg *config.
 			}
 		})
 
-		pkgState, err = loadPackageState(ctx, log, s3Client, awsOpts.Bucket, stateKey)
+		pkgState, err = loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
 		if err != nil {
 			return fmt.Errorf("loading package state from S3: %w", err)
 		}
 
 		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
-			log.Info("Skipping package: not due per schedule",
+			log.Info("Skipping config: not due per schedule",
 				"schedule", cfg.Update.Schedule,
+				"schedule_reason", cfg.Update.Schedule.Reason,
 				"last_checked", pkgState.LastChecked,
 			)
 			return nil
 		}
 	}
 
-	compiledTransforms, err := compileVersionTransforms(cfg.Update.VersionTransform)
-	if err != nil {
-		return fmt.Errorf("compiling version transforms: %w", err)
-	}
-
 	var result versionResult
 	switch {
 	case cfg.Update.GitHubMonitor != nil:
-		result, err = getLatestGitHubVersion(ctx, log, cfg, compiledTransforms)
+		result, err = getLatestGitHubVersion(ctx, cfg, patterns)
 	case cfg.Update.ReleaseMonitor != nil:
-		result, err = getLatestReleaseMonitorVersion(ctx, log, cfg, compiledTransforms)
+		result, err = getLatestReleaseMonitorVersion(ctx, cfg, patterns)
 	case cfg.Update.GitMonitor != nil:
-		result, err = getLatestGitVersion(ctx, log, cfg, compiledTransforms)
+		result, err = getLatestGitVersion(ctx, cfg, patterns)
 	case cfg.Update.OCIMonitor != nil:
-		result, err = getLatestOCIVersion(ctx, log, cfg, compiledTransforms)
+		result, err = getLatestOCIVersion(ctx, cfg, patterns)
 	default:
 		return fmt.Errorf("no update monitor configured for package")
 	}
@@ -977,11 +966,10 @@ func run(ctx context.Context, logger *slog.Logger, filePath string, cfg *config.
 		return fmt.Errorf("fetching upstream version: %w", err)
 	}
 
-	isUpToDate := compareVersions(log, cfg.Package.Version, result.Version) >= 0
-	if isUpToDate {
+	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
 		log.Info("Package is up to date")
 		if s3Client != nil {
-			persistState(ctx, log, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
+			persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
 		}
 		return nil
 	}
@@ -990,9 +978,9 @@ func run(ctx context.Context, logger *slog.Logger, filePath string, cfg *config.
 
 	prBranch := fmt.Sprintf("update-%s", cfg.Package.Name)
 	prTitle := fmt.Sprintf("%s/%s package update", cfg.Package.Name, result.Version)
-	prBody := fmt.Sprintf("<p align=\"center\">\n" +
+	prBody := "<p align=\"center\">\n" +
 		"  <img src=\"https://raw.githubusercontent.com/wolfi-dev/.github/b535a42419ce0edb3c144c0edcff55a62b8ec1f8/profile/wolfi-logo-light-mode.svg\" />\n" +
-		"</p>")
+		"</p>"
 
 	if err := bumpConfig(ctx, filePath, result.Version, result.CommitSHA); err != nil {
 		return fmt.Errorf("bumping config: %w", err)
@@ -1017,15 +1005,14 @@ func run(ctx context.Context, logger *slog.Logger, filePath string, cfg *config.
 
 	ghClient := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
-	if err := ensurePR(ctx, log, ghClient, parts[0], parts[1],
-		filePath, cfg.Package.Name, result.Version,
+	if err := ensurePR(ctx, ghClient, parts[0], parts[1],
+		filePath, cfg.Package.Name,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
 	); err != nil {
-		return fmt.Errorf("ensuring pull request: %w", err)
+		return err
 	}
 
-	log.Info("Package updated successfully", "upstream_version", result.Version)
-	persistState(ctx, log, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
+	persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
 	return nil
 }
