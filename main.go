@@ -592,6 +592,7 @@ func ensurePR(
 	owner, repo string,
 	filePath string,
 	pkgName string,
+	result versionResult,
 	prBranch, prTitle, prBody string,
 	sequential bool,
 	dryRun bool,
@@ -606,9 +607,11 @@ func ensurePR(
 	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
 	var existingFile *github.RepositoryContent
 
-	log.Debug("checking for branch existence")
 	_, resp, err := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
-	branchExists := (err == nil)
+	branchExists := err == nil
+	if !branchExists && resp != nil && resp.StatusCode != 404 {
+		return fmt.Errorf("fetching branch info (status %d): %w", resp.StatusCode, err)
+	}
 
 	branchPRs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
 		State: "open",
@@ -619,25 +622,23 @@ func ensurePR(
 	}
 	prExists := len(branchPRs) > 0
 
-	if branchExists {
-		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-			&github.RepositoryContentGetOptions{Ref: prBranch})
-		if err == nil {
-			existingFile = remoteFile
-			remoteContent, _ := remoteFile.GetContent()
-
-			if remoteContent == string(content) && prExists {
-				log.Info("content already matches branch and PR is open, nothing to do")
-				return nil
-			}
-		}
-
+	if prExists {
 		if sequential {
-			log.Info("Sequential mode: branch exists, skipping update")
+			log.Info("Sequential mode: open PR already exists, skipping")
 			return nil
 		}
-	} else if resp != nil && resp.StatusCode != 404 {
-		return fmt.Errorf("github api error fetching branch info (status %d): %w", resp.StatusCode, err)
+
+		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+			&github.RepositoryContentGetOptions{Ref: prBranch})
+		if err != nil {
+			return fmt.Errorf("fetching file from PR branch: %w", err)
+		}
+		existingFile = remoteFile
+		remoteContent, _ := remoteFile.GetContent()
+		if remoteContent == string(content) {
+			log.Info("content already matches branch and PR is open, nothing to do")
+			return nil
+		}
 	}
 
 	prs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
@@ -646,24 +647,130 @@ func ensurePR(
 	}
 
 	for _, pr := range prs {
-		if strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
-			if sequential {
-				log.Info("open PR exists for package, skipping (sequential)")
-				return nil
-			}
-			if pr.GetTitle() != prTitle {
-				if dryRun {
-					log.Info("DRY RUN: would close superseded PR", "number", pr.GetNumber())
-					continue
-				}
-				log.Info("closing superseded PR", "number", pr.GetNumber())
-				if _, _, err := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
-					State: github.Ptr("closed"),
-				}); err != nil {
-					log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", err)
-				}
+		if !strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
+			continue
+		}
+
+		if sequential {
+			log.Info("open PR exists for package, skipping (sequential)")
+			return nil
+		}
+
+		hasAutomationLabel := false
+		for _, label := range pr.Labels {
+			if label.GetName() == "automated pr" {
+				hasAutomationLabel = true
+				break
 			}
 		}
+		if !hasAutomationLabel {
+			log.Info("open PR missing automation label, skipping",
+				"number", pr.GetNumber(),
+				"title", pr.GetTitle(),
+			)
+			continue
+		}
+
+		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+			&github.RepositoryContentGetOptions{Ref: prBranch})
+		if err != nil {
+			log.Warn("could not fetch config from PR branch, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+
+		remoteContent, err := remoteFile.GetContent()
+		if err != nil {
+			log.Warn("could not decode config from PR branch, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+
+		tmp, err := os.CreateTemp("", "melange-*.yaml")
+		if err != nil {
+			log.Warn("could not create temp file for config parsing, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+		defer func() {
+			if err := os.Remove(tmp.Name()); err != nil {
+				log.Warn("could not remove temp file", "path", tmp.Name(), "error", err)
+			}
+		}()
+
+		if _, err := tmp.WriteString(remoteContent); err != nil {
+			if err := tmp.Close(); err != nil {
+				log.Warn("could not close temp file", "path", tmp.Name(), "error", err)
+			}
+			log.Warn("could not write temp file for config parsing, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+		if err := tmp.Close(); err != nil {
+			log.Warn("could not close temp file for config parsing, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+
+		remoteCfg, err := config.ParseConfiguration(ctx, tmp.Name())
+		if err != nil {
+			log.Warn("could not parse config from PR branch, skipping supersede check",
+				"number", pr.GetNumber(),
+				"error", err,
+			)
+			continue
+		}
+
+		if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
+			log.Info("open PR version is same or newer, skipping",
+				"number", pr.GetNumber(),
+				"pr_version", remoteCfg.Package.Version,
+				"new_version", result.Version,
+			)
+			continue
+		}
+
+		if dryRun {
+			log.Info("DRY RUN: would close superseded PR and open new one",
+				"closing_number", pr.GetNumber(),
+				"closing_version", remoteCfg.Package.Version,
+				"new_version", result.Version,
+			)
+			prExists = false
+			continue
+		}
+
+		if _, _, err := gh.Issues.CreateComment(ctx, owner, repo, pr.GetNumber(), &github.IssueComment{
+			Body: github.Ptr(fmt.Sprintf(
+				"This PR has been superseded by a newer version update: **%s**. Closing automatically.",
+				prTitle,
+			)),
+		}); err != nil {
+			log.Warn("failed to post superseded comment", "number", pr.GetNumber(), "error", err)
+		}
+
+		log.Info("closing superseded PR",
+			"number", pr.GetNumber(),
+			"pr_version", remoteCfg.Package.Version,
+			"new_version", result.Version,
+		)
+		if _, _, err := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
+			State: github.Ptr("closed"),
+		}); err != nil {
+			log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", err)
+		}
+
+		prExists = false
 	}
 
 	if dryRun {
@@ -699,14 +806,13 @@ func ensurePR(
 		existingFile = remoteFile
 	}
 
-	_, _, err = gh.Repositories.UpdateFile(ctx, owner, repo, fileAPIPath,
+	if _, _, err = gh.Repositories.UpdateFile(ctx, owner, repo, fileAPIPath,
 		&github.RepositoryContentFileOptions{
 			Message: github.Ptr(prTitle),
 			Content: content,
 			SHA:     existingFile.SHA,
 			Branch:  github.Ptr(prBranch),
-		})
-	if err != nil {
+		}); err != nil {
 		return fmt.Errorf("updating file: %w", err)
 	}
 
@@ -721,9 +827,8 @@ func ensurePR(
 			return fmt.Errorf("creating PR: %w", err)
 		}
 
-		labels := []string{"automated pr", "request-version-update"}
-		_, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(), labels)
-		if err != nil {
+		if _, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(),
+			[]string{"automated pr", "request-version-update"}); err != nil {
 			log.Warn("failed to add labels", "error", err)
 		}
 
@@ -1007,6 +1112,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 
 	if err := ensurePR(ctx, ghClient, parts[0], parts[1],
 		filePath, cfg.Package.Name,
+		result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
 	); err != nil {
