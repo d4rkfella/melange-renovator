@@ -3,12 +3,12 @@ module github.com/d4rkfella/melange-renovator
 go 1.26
 
 require (
-	chainguard.dev/apko v1.2.4
+	chainguard.dev/apko v1.2.6
 	chainguard.dev/melange v0.50.1
 	github.com/aws/aws-sdk-go-v2 v1.41.6
 	github.com/aws/aws-sdk-go-v2/config v1.32.16
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.15
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.1
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.100.0
 	github.com/aws/smithy-go v1.25.0
 	github.com/chainguard-dev/clog v1.8.0
 	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a
