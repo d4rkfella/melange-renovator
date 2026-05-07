@@ -10,7 +10,7 @@ builds:
       - -s -w -X main.version={{.Version}} -X main.commitSHA={{.Commit}} -X main.buildDate={{.Date}}
 
 archives:
-  - format: tar.gz
+  - formats: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
 sboms:
@@ -32,8 +32,8 @@ signs:
       - "${artifact}"
       - "--yes"
 
-snapshot:
-  name_template: "{{ .Tag }}-next"
+blobs:
+  - directory: "{{ .Tag }}-next"
 
 changelog:
   sort: asc
