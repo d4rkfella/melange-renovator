@@ -13,10 +13,6 @@ updates:
     schedule:
       interval: "daily"
     target-branch: "main"
-    reviewers:
-      - "d4rkfella"
-    assignees:
-      - "d4rkfella"
     commit-message:
       prefix: "chore"
       include: "scope"
