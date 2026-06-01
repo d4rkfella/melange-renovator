@@ -32,9 +32,6 @@ signs:
       - "${artifact}"
       - "--yes"
 
-blobs:
-  - directory: "{{ .Tag }}-next"
-
 changelog:
   sort: asc
   filters:
