@@ -38,7 +38,7 @@ blobs:
 changelog:
   sort: asc
   filters:
-    exclude: ['^docs:', '^test:']
+    exclude: ['^docs:', '^test:', '^Merge pull request']
 
 dockers_v2:
   - ids:
