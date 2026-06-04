@@ -2,10 +2,10 @@
     "name": "Melange Renovator DEV",
     "image": "mcr.microsoft.com/devcontainers/go:1.26",
     "features": {
-        "ghcr.io/devcontainers/features/git:1": {},
-        "ghcr.io/devcontainers/features/github-cli:1": {},
-        "ghcr.io/devcontainers-extra/features/pre-commit:2": {},
-        "ghcr.io/devcontainers/features/docker-in-docker:2.16.1": {
+        "ghcr.io/devcontainers/features/git:1.3.5": {},
+        "ghcr.io/devcontainers/features/github-cli:1.1.0": {},
+        "ghcr.io/devcontainers-extra/features/pre-commit:2.0.18": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:3.0.1": {
             "moby": false
         }
     },
