@@ -1,9 +1,9 @@
-chainguard.dev/apko v1.2.15 h1:Qe9ywsyZhwaKT89y4o4GirsD1jet8qOYw8uSAkey/hU=
-chainguard.dev/apko v1.2.15/go.mod h1:mwhHEOQnzVn6RMADImH2+/asMoblIeyVZZ1JRBY8Vug=
+chainguard.dev/apko v1.2.16 h1:D8mgySAh59hb4/XOtL9B0GAbM55Dld3R95T/DRIguj8=
+chainguard.dev/apko v1.2.16/go.mod h1:mwhHEOQnzVn6RMADImH2+/asMoblIeyVZZ1JRBY8Vug=
 chainguard.dev/go-grpc-kit v0.17.17 h1:Jwhc0zyUwQbC2hNcsi+YMeUX/JUnM+dXVCkTw6wtPzs=
 chainguard.dev/go-grpc-kit v0.17.17/go.mod h1:qn0meP6RtrbLicE1bgBZnnVU9dvX95eLs0x0T6kZ+b4=
-chainguard.dev/melange v0.52.0 h1:eAZF/E2izOmVq2ynEt2pOMizpFB1PMlsfjDj6uz+zxc=
-chainguard.dev/melange v0.52.0/go.mod h1:l9wxDZKS94dNE8gSqp0DlLv9EA863cfrCNPXj8Mlgpc=
+chainguard.dev/melange v0.52.1 h1:k0HuQ0yOstKVV1ezFm+KsXcjsgVKuom9YyuaxhAQsoo=
+chainguard.dev/melange v0.52.1/go.mod h1:l9wxDZKS94dNE8gSqp0DlLv9EA863cfrCNPXj8Mlgpc=
 chainguard.dev/sdk v0.1.55 h1:QEGW0BVNcvbUkjBFKKCR/34in69PPoV4jZejkN45uu4=
 chainguard.dev/sdk v0.1.55/go.mod h1:Yz9yDGzD0/q9/uwaKEe3BThr7Kbs6YisXT3D3yjSSfs=
 cloud.google.com/go/auth v0.20.0 h1:kXTssoVb4azsVDoUiF8KvxAqrsQcQtB53DcSgta74CA=
@@ -59,8 +59,8 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.5 h1:KSzGGqfk39O+WU3OEyYbx6F7
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.5/go.mod h1:ATs88lXDeQB6CZOgQ5BIl9JbYS+EsCWUSDyff6L/oVo=
 github.com/aws/aws-sdk-go-v2/service/sts v1.43.2 h1:RTO7mmGyedgnNmcPh3yQizNfc6GKoV5iqfdJavuf9vw=
 github.com/aws/aws-sdk-go-v2/service/sts v1.43.2/go.mod h1:fBhUZXDin9YYqhcpOMjIcpdik25rVwWyxLdPH1RZd9s=
-github.com/aws/smithy-go v1.27.1 h1:4T340VFndXtADGF52gYa1POyL7s9E4Z1OeZ1hCscIw8=
-github.com/aws/smithy-go v1.27.1/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
+github.com/aws/smithy-go v1.27.2 h1:y9NPmSE6am6LjEFPfqHqG/jJk7AauQvhCJONKh7kpzk=
+github.com/aws/smithy-go v1.27.2/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
