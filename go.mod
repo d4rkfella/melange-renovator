@@ -14,7 +14,7 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a
 	github.com/chromedp/chromedp v0.15.1
 	github.com/go-git/go-git/v5 v5.19.1
-	github.com/google/go-containerregistry v0.21.6
+	github.com/google/go-containerregistry v0.21.7
 	github.com/google/go-github/v81 v81.0.0
 	golang.org/x/sync v0.21.0
 )
