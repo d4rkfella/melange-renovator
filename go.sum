@@ -1,5 +1,5 @@
-chainguard.dev/apko v1.2.17 h1:/mIW439i8wONJfU1E8mqVpThjfd5nin52XQi4/hr3Iw=
-chainguard.dev/apko v1.2.17/go.mod h1:1L1UuLB3MMGriXbw5pHcMTGXbqM3FJeZ98ZFZ/jmnt8=
+chainguard.dev/apko v1.2.18 h1:CFZ0YG7t6U0k2mDYs22l67SF7ukHtkyXVJFj/qhf8+c=
+chainguard.dev/apko v1.2.18/go.mod h1:G/xIzbXWAeBNWJKtcVbJpTSrmgb1ElL382XlqVLh95Q=
 chainguard.dev/go-grpc-kit v0.17.17 h1:Jwhc0zyUwQbC2hNcsi+YMeUX/JUnM+dXVCkTw6wtPzs=
 chainguard.dev/go-grpc-kit v0.17.17/go.mod h1:qn0meP6RtrbLicE1bgBZnnVU9dvX95eLs0x0T6kZ+b4=
 chainguard.dev/melange v0.54.0 h1:GlbSY0TdwlB95Zralv62hdlNeSYDEaAkeXC17oRNh7U=
@@ -378,7 +378,7 @@ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 gotest.tools/v3 v3.5.2 h1:7koQfIKdy+I8UTetycgUqXWSDwpgv193Ka+qRsmBY8Q=
 gotest.tools/v3 v3.5.2/go.mod h1:LtdLGcnqToBH83WByAAi/wiwSFCArdFIUV/xxN4pcjA=
-k8s.io/apimachinery v0.36.1 h1:G63Gjx2W+q0YD+72Vo8oY0nDnePVwnuzTmmy5ENrVSA=
-k8s.io/apimachinery v0.36.1/go.mod h1:ibYOR00vW/I1kzvi5SF0dRuJ52BvKtfvRdOn35GPQ+8=
+k8s.io/apimachinery v0.36.2 h1:0PE/W/WNy1UX61NLbXY5TMbJ6UwLL6E6lAPkYrKFxbQ=
+k8s.io/apimachinery v0.36.2/go.mod h1:fvf/HOLXq9RId0rnDIbN1OEBvHXdQbLMM8nu0LcBUf4=
 sigs.k8s.io/release-utils v0.12.4 h1:kuG6WTWGCKx5uUrJwl2uFErOKOw+4Ba8WrPmOQh5J3g=
 sigs.k8s.io/release-utils v0.12.4/go.mod h1:Tc3iM9DVM3W9oJu/6rEI+LnREuhy8lZ7wInQhRBtUoo=
