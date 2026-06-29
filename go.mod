@@ -4,12 +4,12 @@ go 1.26.2
 
 require (
 	chainguard.dev/apko v1.2.19
-	chainguard.dev/melange v0.54.0
+	chainguard.dev/melange v0.55.0
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.0
-	github.com/aws/smithy-go v1.27.2
+	github.com/aws/smithy-go v1.27.3
 	github.com/chainguard-dev/clog v1.8.1
 	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a
 	github.com/chromedp/chromedp v0.15.1
