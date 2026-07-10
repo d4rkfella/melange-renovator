@@ -3,7 +3,7 @@ module github.com/d4rkfella/melange-renovator
 go 1.26.2
 
 require (
-	chainguard.dev/apko v1.2.23
+	chainguard.dev/apko v1.2.24
 	chainguard.dev/melange v0.56.1
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.29
