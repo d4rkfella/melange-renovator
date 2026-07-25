@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,9 +59,15 @@ type awsOptions struct {
 	Endpoint  string
 }
 
+// versionResult now threads through both the raw upstream tag that was
+// matched (pre-transform) and the transformed value that was actually
+// APK-compared, so the report can show why a given tag won.
 type versionResult struct {
-	Version   string
-	CommitSHA string
+	Version        string // == best.Transformed; what's apk-compared and lands in the melange config
+	UpstreamTag    string // == best.Upstream; the raw tag/release/ref matched from the source
+	CommitSHA      string
+	TagsConsidered int // total upstream versions seen before filtering
+	TagsSkipped    int // subset filtered out by prefix/contains/ignore-regex or failed APK version parsing
 }
 
 type tagRef struct {
@@ -78,9 +86,66 @@ type versionCandidate struct {
 	ApkVer      apk.Version
 }
 
+// resolveStats captures how many upstream versions were considered vs
+// filtered out, so callers can surface it as a non-fatal warning instead of
+// it only being visible at -log-level=debug.
+type resolveStats struct {
+	Total   int
+	Skipped int
+}
+
 type compiledPatterns struct {
 	IgnorePatterns    []*regexp.Regexp
 	VersionTransforms []compiledVersionTransform
+}
+
+// ---- Structured report types (Renovate-style output) ----
+
+type vtInfo struct {
+	Match   string `json:"match"`
+	Replace string `json:"replace"`
+}
+
+type monitorConfig struct {
+	Type                 string   `json:"type"` // github-tags | github-releases | git-refs | release-monitor | oci
+	Identifier           string   `json:"identifier,omitempty"`
+	UseTags              bool     `json:"useTags,omitempty"`
+	EnablePreReleaseTags bool     `json:"enablePreReleaseTags,omitempty"`
+	FilterPrefix         string   `json:"filterPrefix,omitempty"`
+	FilterContains       string   `json:"filterContains,omitempty"`
+	StripPrefix          string   `json:"stripPrefix,omitempty"`
+	StripSuffix          string   `json:"stripSuffix,omitempty"`
+	VersionTransforms    []vtInfo `json:"versionTransforms,omitempty"`
+	IgnoreRegexPatterns  []string `json:"ignoreRegexPatterns,omitempty"`
+}
+
+type scheduleInfo struct {
+	Period string `json:"period,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type renovateDep struct {
+	DepName         string        `json:"depName"`
+	PackageName     string        `json:"packageName"`
+	ConfigPath      string        `json:"packageFile"`
+	Monitor         monitorConfig `json:"monitor"`
+	Schedule        *scheduleInfo `json:"schedule,omitempty"`
+	CurrentVersion  string        `json:"currentVersion"`
+	ResolvedTag     string        `json:"resolvedUpstreamTag,omitempty"`
+	ResolvedVersion string        `json:"resolvedTransformedVersion,omitempty"`
+	ResolvedCommit  string        `json:"resolvedCommitSha,omitempty"`
+	FixedVersion    string        `json:"fixedVersion,omitempty"`
+	UpdateAvailable bool          `json:"updateAvailable"`
+	Skipped         bool          `json:"skipped"`
+	SkipReason      string        `json:"skipReason,omitempty"`
+	PRUrl           string        `json:"prUrl,omitempty"`
+	DryRun          bool          `json:"dryRun,omitempty"`
+	Warnings        []string      `json:"warnings"`
+}
+
+type renovatePackageFile struct {
+	PackageFile string        `json:"packageFile"`
+	Deps        []renovateDep `json:"deps"`
 }
 
 var (
@@ -127,12 +192,14 @@ func resolveLatestVersion(
 	versions []string,
 	versionHandler config.VersionHandler,
 	patterns compiledPatterns,
-) (*versionCandidate, error) {
+) (*versionCandidate, resolveStats, error) {
 	log := clog.FromContext(ctx)
 	var best *versionCandidate
+	stats := resolveStats{Total: len(versions)}
 
 	for _, upstream := range versions {
 		if shouldSkipVersion(ctx, upstream, versionHandler, patterns.IgnorePatterns) {
+			stats.Skipped++
 			continue
 		}
 
@@ -143,6 +210,7 @@ func resolveLatestVersion(
 
 		ver, err := apk.ParseVersion(transformed)
 		if err != nil {
+			stats.Skipped++
 			if transformed != upstream {
 				log.Debug("Version skipped: APK version parsing failed after transform — check your version-transform regex",
 					"upstream", upstream,
@@ -164,7 +232,7 @@ func resolveLatestVersion(
 	}
 
 	if best == nil {
-		return nil, fmt.Errorf("all upstream tags were filtered out or could not be parsed as valid APK versions")
+		return nil, stats, fmt.Errorf("all upstream tags were filtered out or could not be parsed as valid APK versions")
 	}
 
 	if best.Upstream != best.Transformed {
@@ -173,7 +241,7 @@ func resolveLatestVersion(
 		log.Debug("Resolved version string used for comparison", "tag", best.Upstream)
 	}
 
-	return best, nil
+	return best, stats, nil
 }
 
 func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
@@ -221,14 +289,20 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 			tagNames[i] = t.name
 		}
 
-		best, err := resolveLatestVersion(ctx, tagNames, gh, patterns)
+		best, stats, err := resolveLatestVersion(ctx, tagNames, gh, patterns)
 		if err != nil {
 			return versionResult{}, fmt.Errorf("no valid tags found for %s/%s: %w", owner, repo, err)
 		}
 
 		for _, t := range allTags {
 			if t.name == best.Upstream {
-				return versionResult{Version: best.Transformed, CommitSHA: t.sha}, nil
+				return versionResult{
+					Version:        best.Transformed,
+					UpstreamTag:    best.Upstream,
+					CommitSHA:      t.sha,
+					TagsConsidered: stats.Total,
+					TagsSkipped:    stats.Skipped,
+				}, nil
 			}
 		}
 		return versionResult{}, fmt.Errorf("failed to resolve SHA for tag %s", best.Upstream)
@@ -257,7 +331,7 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 		return versionResult{}, fmt.Errorf("no releases found for GitHub repository %s/%s", owner, repo)
 	}
 
-	best, err := resolveLatestVersion(ctx, allTagNames, gh, patterns)
+	best, stats, err := resolveLatestVersion(ctx, allTagNames, gh, patterns)
 	if err != nil {
 		return versionResult{}, fmt.Errorf("no valid versions found for %s/%s: %w", owner, repo, err)
 	}
@@ -281,22 +355,34 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 		}
 	}
 
-	return versionResult{Version: best.Transformed, CommitSHA: sha}, nil
+	return versionResult{
+		Version:        best.Transformed,
+		UpstreamTag:    best.Upstream,
+		CommitSHA:      sha,
+		TagsConsidered: stats.Total,
+		TagsSkipped:    stats.Skipped,
+	}, nil
+}
+
+// gitCheckoutRepoURL scans a config's pipeline for the git-checkout step's
+// repository field. Shared by getLatestGitVersion and buildMonitorConfig so
+// the report and the actual resolution logic never drift apart.
+func gitCheckoutRepoURL(cfg *config.Configuration) string {
+	for _, step := range cfg.Pipeline {
+		if step.Uses == "git-checkout" {
+			if repo := step.With["repository"]; repo != "" {
+				return repo
+			}
+		}
+	}
+	return ""
 }
 
 func getLatestGitVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
 	log := clog.FromContext(ctx)
 	gitMonitor := cfg.Update.GitMonitor
 
-	repoURL := ""
-	for _, step := range cfg.Pipeline {
-		if step.Uses == "git-checkout" {
-			if repo := step.With["repository"]; repo != "" {
-				repoURL = repo
-				break
-			}
-		}
-	}
+	repoURL := gitCheckoutRepoURL(cfg)
 	if repoURL == "" {
 		return versionResult{}, fmt.Errorf("no git-checkout step found in pipeline")
 	}
@@ -334,7 +420,7 @@ func getLatestGitVersion(ctx context.Context, cfg *config.Configuration, pattern
 		tagHashMap[t.Name] = t.Hash
 	}
 
-	best, err := resolveLatestVersion(ctx, tagNames, gitMonitor, patterns)
+	best, stats, err := resolveLatestVersion(ctx, tagNames, gitMonitor, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
@@ -361,7 +447,13 @@ func getLatestGitVersion(ctx context.Context, cfg *config.Configuration, pattern
 		return versionResult{}, fmt.Errorf("failed to resolve commit for tag %s", best.Upstream)
 	}
 
-	return versionResult{Version: best.Transformed, CommitSHA: resolvedSHA}, nil
+	return versionResult{
+		Version:        best.Transformed,
+		UpstreamTag:    best.Upstream,
+		CommitSHA:      resolvedSHA,
+		TagsConsidered: stats.Total,
+		TagsSkipped:    stats.Skipped,
+	}, nil
 }
 
 func getLatestReleaseMonitorVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
@@ -432,12 +524,17 @@ func getLatestReleaseMonitorVersion(ctx context.Context, cfg *config.Configurati
 		return versionResult{}, fmt.Errorf("no versions found in release-monitor response for project %d", rm.Identifier)
 	}
 
-	best, err := resolveLatestVersion(ctx, versions, rm, patterns)
+	best, stats, err := resolveLatestVersion(ctx, versions, rm, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
 
-	return versionResult{Version: best.Transformed}, nil
+	return versionResult{
+		Version:        best.Transformed,
+		UpstreamTag:    best.Upstream,
+		TagsConsidered: stats.Total,
+		TagsSkipped:    stats.Skipped,
+	}, nil
 }
 
 func getLatestOCIVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
@@ -457,12 +554,17 @@ func getLatestOCIVersion(ctx context.Context, cfg *config.Configuration, pattern
 		return versionResult{}, fmt.Errorf("no tags found for OCI image %s", oci.Identifier)
 	}
 
-	best, err := resolveLatestVersion(ctx, tags, oci, patterns)
+	best, stats, err := resolveLatestVersion(ctx, tags, oci, patterns)
 	if err != nil {
 		return versionResult{}, err
 	}
 
-	return versionResult{Version: best.Transformed}, nil
+	return versionResult{
+		Version:        best.Transformed,
+		UpstreamTag:    best.Upstream,
+		TagsConsidered: stats.Total,
+		TagsSkipped:    stats.Skipped,
+	}, nil
 }
 
 func truncateString(s string, maxLen int) string {
@@ -492,6 +594,67 @@ func compilePatterns(cfg *config.Configuration) (compiledPatterns, error) {
 	}
 
 	return compiledPatterns{IgnorePatterns: ignorePatterns, VersionTransforms: transforms}, nil
+}
+
+func transformsToInfo(ts []config.VersionTransform) []vtInfo {
+	out := make([]vtInfo, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, vtInfo{Match: t.Match, Replace: t.Replace})
+	}
+	return out
+}
+
+// buildMonitorConfig reflects the config values that actually drove
+// resolution for this package (filters, strip rules, transforms, ignore
+// patterns) into the report, keyed by which monitor type is active.
+func buildMonitorConfig(cfg *config.Configuration) monitorConfig {
+	common := func(vh config.VersionHandler) monitorConfig {
+		return monitorConfig{
+			FilterPrefix:        vh.GetFilterPrefix(),
+			FilterContains:      vh.GetFilterContains(),
+			StripPrefix:         vh.GetStripPrefix(),
+			StripSuffix:         vh.GetStripSuffix(),
+			VersionTransforms:   transformsToInfo(cfg.Update.VersionTransform),
+			IgnoreRegexPatterns: cfg.Update.IgnoreRegexPatterns,
+		}
+	}
+
+	switch {
+	case cfg.Update.GitHubMonitor != nil:
+		gh := cfg.Update.GitHubMonitor
+		mc := common(gh)
+		mc.Type = "github-releases"
+		if gh.UseTags {
+			mc.Type = "github-tags"
+		}
+		mc.Identifier = gh.Identifier
+		mc.UseTags = gh.UseTags
+		mc.EnablePreReleaseTags = cfg.Update.EnablePreReleaseTags
+		return mc
+
+	case cfg.Update.GitMonitor != nil:
+		mc := common(cfg.Update.GitMonitor)
+		mc.Type = "git-refs"
+		mc.Identifier = gitCheckoutRepoURL(cfg)
+		return mc
+
+	case cfg.Update.ReleaseMonitor != nil:
+		rm := cfg.Update.ReleaseMonitor
+		mc := common(rm)
+		mc.Type = "release-monitor"
+		mc.Identifier = fmt.Sprintf("%d", rm.Identifier)
+		mc.EnablePreReleaseTags = cfg.Update.EnablePreReleaseTags
+		return mc
+
+	case cfg.Update.OCIMonitor != nil:
+		oci := cfg.Update.OCIMonitor
+		mc := common(oci)
+		mc.Type = "oci"
+		mc.Identifier = oci.Identifier
+		return mc
+	}
+
+	return monitorConfig{Type: "none"}
 }
 
 func compareVersions(ctx context.Context, currentStr, latestStr string) int {
@@ -586,6 +749,8 @@ func shouldRunSchedule(s *config.Schedule, lastChecked time.Time) bool {
 	}
 }
 
+// ensurePR now returns the URL of the PR it created or found (if any), so
+// the caller can surface it in the report.
 func ensurePR(
 	ctx context.Context,
 	gh *github.Client,
@@ -596,12 +761,13 @@ func ensurePR(
 	prBranch, prTitle, prBody string,
 	sequential bool,
 	dryRun bool,
-) error {
+) (string, []int, error) {
 	log := clog.FromContext(ctx)
+	var closedSuperseded []int
 
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
+		return "", nil, fmt.Errorf("reading file: %w", err)
 	}
 
 	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
@@ -610,7 +776,7 @@ func ensurePR(
 	_, resp, err := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
 	branchExists := err == nil
 	if !branchExists && resp != nil && resp.StatusCode != 404 {
-		return fmt.Errorf("fetching branch info (status %d): %w", resp.StatusCode, err)
+		return "", nil, fmt.Errorf("fetching branch info (status %d): %w", resp.StatusCode, err)
 	}
 
 	branchPRs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
@@ -618,32 +784,36 @@ func ensurePR(
 		Head:  fmt.Sprintf("%s:%s", owner, prBranch),
 	})
 	if err != nil {
-		return fmt.Errorf("checking for existing branch PRs: %w", err)
+		return "", nil, fmt.Errorf("checking for existing branch PRs: %w", err)
 	}
 	prExists := len(branchPRs) > 0
+	var prURL string
+	if prExists {
+		prURL = branchPRs[0].GetHTMLURL()
+	}
 
 	if prExists {
 		if sequential {
 			log.Info("Sequential mode: open PR already exists, skipping")
-			return nil
+			return prURL, nil, nil
 		}
 
 		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
 			&github.RepositoryContentGetOptions{Ref: prBranch})
 		if err != nil {
-			return fmt.Errorf("fetching file from PR branch: %w", err)
+			return "", nil, fmt.Errorf("fetching file from PR branch: %w", err)
 		}
 		existingFile = remoteFile
 		remoteContent, _ := remoteFile.GetContent()
 		if remoteContent == string(content) {
 			log.Info("content already matches branch and PR is open, nothing to do")
-			return nil
+			return prURL, nil, nil
 		}
 	}
 
 	prs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
 	if err != nil {
-		return fmt.Errorf("listing all open PRs: %w", err)
+		return "", nil, fmt.Errorf("listing all open PRs: %w", err)
 	}
 
 	for _, pr := range prs {
@@ -653,7 +823,7 @@ func ensurePR(
 
 		if sequential {
 			log.Info("open PR exists for package, skipping (sequential)")
-			return nil
+			return pr.GetHTMLURL(), nil, nil
 		}
 
 		hasAutomationLabel := false
@@ -768,24 +938,26 @@ func ensurePR(
 			State: github.Ptr("closed"),
 		}); err != nil {
 			log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", err)
+		} else {
+			closedSuperseded = append(closedSuperseded, pr.GetNumber())
 		}
 
 		prExists = false
 	}
 
 	if dryRun {
-		return nil
+		return "", closedSuperseded, nil
 	}
 
 	repoInfo, _, err := gh.Repositories.Get(ctx, owner, repo)
 	if err != nil {
-		return fmt.Errorf("getting repo info: %w", err)
+		return "", nil, fmt.Errorf("getting repo info: %w", err)
 	}
 	defaultBranch := repoInfo.GetDefaultBranch()
 
 	ref, _, err := gh.Git.GetRef(ctx, owner, repo, "refs/heads/"+defaultBranch)
 	if err != nil {
-		return fmt.Errorf("getting default branch ref: %w", err)
+		return "", nil, fmt.Errorf("getting default branch ref: %w", err)
 	}
 	headSHA := ref.Object.GetSHA()
 
@@ -795,13 +967,13 @@ func ensurePR(
 			SHA: headSHA,
 		})
 		if err != nil && !strings.Contains(err.Error(), "already exists") {
-			return fmt.Errorf("creating branch: %w", err)
+			return "", nil, fmt.Errorf("creating branch: %w", err)
 		}
 
 		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
 			&github.RepositoryContentGetOptions{Ref: prBranch})
 		if err != nil {
-			return fmt.Errorf("fetching file info from new branch: %w", err)
+			return "", nil, fmt.Errorf("fetching file info from new branch: %w", err)
 		}
 		existingFile = remoteFile
 	}
@@ -813,7 +985,7 @@ func ensurePR(
 			SHA:     existingFile.SHA,
 			Branch:  github.Ptr(prBranch),
 		}); err != nil {
-		return fmt.Errorf("updating file: %w", err)
+		return "", nil, fmt.Errorf("updating file: %w", err)
 	}
 
 	if !prExists {
@@ -824,7 +996,7 @@ func ensurePR(
 			Base:  github.Ptr(defaultBranch),
 		})
 		if err != nil {
-			return fmt.Errorf("creating PR: %w", err)
+			return "", nil, fmt.Errorf("creating PR: %w", err)
 		}
 
 		if _, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(),
@@ -833,9 +1005,10 @@ func ensurePR(
 		}
 
 		log.Info("PR is ready!", "url", newPR.GetHTMLURL())
+		prURL = newPR.GetHTMLURL()
 	}
 
-	return nil
+	return prURL, closedSuperseded, nil
 }
 
 func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
@@ -923,6 +1096,9 @@ func main() {
 	awsSecretKeyFlag := flag.String("aws-secret-key", "", "AWS secret access key")
 	awsEndpointFlag := flag.String("aws-endpoint", "", "Custom S3 endpoint URL")
 
+	jsonOutputFlag := flag.Bool("json", false, "Print a Renovate-style structured JSON report to stdout")
+	jsonOutputFileFlag := flag.String("json-output-file", "", "Also write the JSON report to this path")
+
 	flag.Parse()
 
 	var logLevel slog.Level
@@ -977,14 +1153,37 @@ func main() {
 	var successCount int64
 	var failureCount int64
 
+	var reportMu sync.Mutex
+	var report []renovatePackageFile
+
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			if err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts); err != nil {
+			dep, err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts)
+			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				atomic.AddInt64(&failureCount, 1)
-				return nil
+				if dep == nil {
+					dep = &renovateDep{
+						DepName:     item.Config.Package.Name,
+						PackageName: item.Config.Package.Name,
+						ConfigPath:  item.Path,
+						Monitor:     buildMonitorConfig(item.Config),
+						Warnings:    []string{err.Error()},
+					}
+				} else {
+					dep.Warnings = append(dep.Warnings, err.Error())
+				}
+			} else {
+				atomic.AddInt64(&successCount, 1)
 			}
-			atomic.AddInt64(&successCount, 1)
+
+			reportMu.Lock()
+			report = append(report, renovatePackageFile{
+				PackageFile: item.Path,
+				Deps:        []renovateDep{*dep},
+			})
+			reportMu.Unlock()
+
 			return nil
 		})
 	}
@@ -999,9 +1198,36 @@ func main() {
 		"succeeded", atomic.LoadInt64(&successCount),
 		"failed", atomic.LoadInt64(&failureCount),
 	)
+
+	sort.Slice(report, func(i, j int) bool {
+		return report[i].PackageFile < report[j].PackageFile
+	})
+
+	if *jsonOutputFlag || *jsonOutputFileFlag != "" {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			log.Error("failed to marshal JSON report", "error", err)
+			os.Exit(1)
+		}
+
+		if *jsonOutputFlag {
+			fmt.Println(string(data))
+		}
+
+		if *jsonOutputFileFlag != "" {
+			if err := os.WriteFile(*jsonOutputFileFlag, data, 0644); err != nil {
+				log.Error("failed to write JSON report to file", "path", *jsonOutputFileFlag, "error", err)
+				os.Exit(1)
+			}
+			log.Info("wrote JSON report", "path", *jsonOutputFileFlag)
+		}
+	}
 }
 
-func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) error {
+// run resolves the latest upstream version for a single package, opens or
+// updates a PR if needed, and always returns a renovateDep describing what
+// it found/did — even on error, so callers can still emit a report entry.
+func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -1009,9 +1235,27 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 	))
 	log := clog.FromContext(ctx)
 
+	dep := &renovateDep{
+		DepName:        cfg.Package.Name,
+		PackageName:    cfg.Package.Name,
+		ConfigPath:     filePath,
+		Monitor:        buildMonitorConfig(cfg),
+		CurrentVersion: cfg.Package.Version,
+		Warnings:       []string{},
+		DryRun:         dryRun,
+	}
+	if cfg.Update.Schedule != nil {
+		dep.Schedule = &scheduleInfo{
+			Period: string(cfg.Update.Schedule.Period),
+			Reason: cfg.Update.Schedule.Reason,
+		}
+	}
+
 	patterns, err := compilePatterns(cfg)
 	if err != nil {
-		return fmt.Errorf("compiling patterns: %w", err)
+		dep.Skipped = true
+		dep.SkipReason = err.Error()
+		return dep, fmt.Errorf("compiling patterns: %w", err)
 	}
 
 	var s3Client *s3.Client
@@ -1030,7 +1274,9 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 
 		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
 		if err != nil {
-			return fmt.Errorf("loading AWS config: %w", err)
+			dep.Skipped = true
+			dep.SkipReason = err.Error()
+			return dep, fmt.Errorf("loading AWS config: %w", err)
 		}
 
 		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
@@ -1041,7 +1287,9 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 
 		pkgState, err = loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
 		if err != nil {
-			return fmt.Errorf("loading package state from S3: %w", err)
+			dep.Skipped = true
+			dep.SkipReason = err.Error()
+			return dep, fmt.Errorf("loading package state from S3: %w", err)
 		}
 
 		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
@@ -1050,8 +1298,16 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 				"schedule_reason", cfg.Update.Schedule.Reason,
 				"last_checked", pkgState.LastChecked,
 			)
-			return nil
+			dep.Skipped = true
+			dep.SkipReason = "not due per schedule"
+			dep.FixedVersion = cfg.Package.Version
+			return dep, nil
 		}
+	}
+
+	if cfg.Update.GitHubMonitor != nil && os.Getenv("GITHUB_TOKEN") == "" {
+		dep.Warnings = append(dep.Warnings,
+			"GITHUB_TOKEN is not set; GitHub API calls for this package will use the unauthenticated rate limit (60 req/hr)")
 	}
 
 	var result versionResult
@@ -1065,21 +1321,38 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 	case cfg.Update.OCIMonitor != nil:
 		result, err = getLatestOCIVersion(ctx, cfg, patterns)
 	default:
-		return fmt.Errorf("no update monitor configured for package")
+		dep.Skipped = true
+		dep.SkipReason = "no update monitor configured for package"
+		return dep, fmt.Errorf("no update monitor configured for package")
 	}
 	if err != nil {
-		return fmt.Errorf("fetching upstream version: %w", err)
+		dep.Skipped = true
+		dep.SkipReason = err.Error()
+		return dep, fmt.Errorf("fetching upstream version: %w", err)
+	}
+
+	dep.ResolvedTag = result.UpstreamTag
+	dep.ResolvedVersion = result.Version
+	dep.ResolvedCommit = result.CommitSHA
+
+	if result.TagsSkipped > 0 {
+		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
+			"%d of %d upstream versions were filtered out by prefix/contains/ignore-regex rules or failed APK version parsing (rerun with -log-level=debug for details)",
+			result.TagsSkipped, result.TagsConsidered))
 	}
 
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
 		log.Info("Package is up to date")
+		dep.FixedVersion = cfg.Package.Version
+		dep.UpdateAvailable = false
 		if s3Client != nil {
 			persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
 		}
-		return nil
+		return dep, nil
 	}
 
 	log.Info("Update is available", "resolved_version", result.Version)
+	dep.UpdateAvailable = true
 
 	prBranch := fmt.Sprintf("update-%s", cfg.Package.Name)
 	prTitle := fmt.Sprintf("%s/%s package update", cfg.Package.Name, result.Version)
@@ -1088,7 +1361,8 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		"</p>"
 
 	if err := bumpConfig(ctx, filePath, result.Version, result.CommitSHA); err != nil {
-		return fmt.Errorf("bumping config: %w", err)
+		dep.Warnings = append(dep.Warnings, err.Error())
+		return dep, fmt.Errorf("bumping config: %w", err)
 	}
 
 	if dryRun {
@@ -1096,29 +1370,42 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		content := fmt.Sprintf("BRANCH: %s\nTITLE: %s\nBODY: %s\n", prBranch, prTitle, prBody)
 		if err := os.WriteFile(dryRunPath, []byte(content), 0644); err != nil {
 			log.Warn("Failed to write dry-run artifact", "path", dryRunPath, "error", err)
+			dep.Warnings = append(dep.Warnings, fmt.Sprintf("failed to write dry-run artifact: %v", err))
 		} else {
 			log.Info("DRY RUN: wrote PR metadata to disk", "path", dryRunPath)
 		}
-		return nil
+		return dep, nil
 	}
 
 	repoEnv := os.Getenv("GITHUB_REPOSITORY")
 	parts := strings.Split(repoEnv, "/")
 	if len(parts) != 2 {
-		return fmt.Errorf("invalid GITHUB_REPOSITORY format %q: expected owner/repo", repoEnv)
+		dep.Warnings = append(dep.Warnings, fmt.Sprintf("invalid GITHUB_REPOSITORY format %q", repoEnv))
+		return dep, fmt.Errorf("invalid GITHUB_REPOSITORY format %q: expected owner/repo", repoEnv)
 	}
 
 	ghClient := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
-	if err := ensurePR(ctx, ghClient, parts[0], parts[1],
+	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, parts[0], parts[1],
 		filePath, cfg.Package.Name,
 		result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
-	); err != nil {
-		return err
+	)
+	if err != nil {
+		dep.Warnings = append(dep.Warnings, err.Error())
+		return dep, err
+	}
+	dep.PRUrl = prURL
+	if len(closedSuperseded) > 0 {
+		numbers := make([]string, len(closedSuperseded))
+		for i, n := range closedSuperseded {
+			numbers[i] = fmt.Sprintf("#%d", n)
+		}
+		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
+			"closed superseded PR(s) %s in favor of this update", strings.Join(numbers, ", ")))
 	}
 
 	persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
-	return nil
+	return dep, nil
 }
