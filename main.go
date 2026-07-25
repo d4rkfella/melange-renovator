@@ -144,7 +144,7 @@ func resolveLatestVersion(
 		ver, err := apk.ParseVersion(transformed)
 		if err != nil {
 			if transformed != upstream {
-				log.Warn("Version skipped: APK version parsing failed after transform — check your version-transform regex",
+				log.Debug("Version skipped: APK version parsing failed after transform — check your version-transform regex",
 					"upstream", upstream,
 					"transformed", transformed,
 					"error", err)
@@ -890,7 +890,7 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 
 		cfg, err := config.ParseConfiguration(ctx, path)
 		if err != nil {
-			log.Warn("Failed to parse as valid melange configuration", "path", path, "error", err)
+			log.Debug("Failed to parse as valid melange configuration", "path", path, "error", err)
 			return nil
 		}
 
