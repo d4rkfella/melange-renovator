@@ -59,15 +59,12 @@ type awsOptions struct {
 	Endpoint  string
 }
 
-// versionResult now threads through both the raw upstream tag that was
-// matched (pre-transform) and the transformed value that was actually
-// APK-compared, so the report can show why a given tag won.
 type versionResult struct {
-	Version        string // == best.Transformed; what's apk-compared and lands in the melange config
-	UpstreamTag    string // == best.Upstream; the raw tag/release/ref matched from the source
+	Version        string
+	UpstreamTag    string
 	CommitSHA      string
-	TagsConsidered int // total upstream versions seen before filtering
-	TagsSkipped    int // subset filtered out by prefix/contains/ignore-regex or failed APK version parsing
+	TagsConsidered int
+	TagsSkipped    int
 }
 
 type tagRef struct {
@@ -86,9 +83,6 @@ type versionCandidate struct {
 	ApkVer      apk.Version
 }
 
-// resolveStats captures how many upstream versions were considered vs
-// filtered out, so callers can surface it as a non-fatal warning instead of
-// it only being visible at -log-level=debug.
 type resolveStats struct {
 	Total   int
 	Skipped int
@@ -99,15 +93,13 @@ type compiledPatterns struct {
 	VersionTransforms []compiledVersionTransform
 }
 
-// ---- Structured report types (Renovate-style output) ----
-
 type vtInfo struct {
 	Match   string `json:"match"`
 	Replace string `json:"replace"`
 }
 
 type monitorConfig struct {
-	Type                 string   `json:"type"` // github-tags | github-releases | git-refs | release-monitor | oci
+	Type                 string   `json:"type"`
 	Identifier           string   `json:"identifier,omitempty"`
 	UseTags              bool     `json:"useTags,omitempty"`
 	EnablePreReleaseTags bool     `json:"enablePreReleaseTags,omitempty"`
@@ -364,9 +356,6 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 	}, nil
 }
 
-// gitCheckoutRepoURL scans a config's pipeline for the git-checkout step's
-// repository field. Shared by getLatestGitVersion and buildMonitorConfig so
-// the report and the actual resolution logic never drift apart.
 func gitCheckoutRepoURL(cfg *config.Configuration) string {
 	for _, step := range cfg.Pipeline {
 		if step.Uses == "git-checkout" {
@@ -604,9 +593,6 @@ func transformsToInfo(ts []config.VersionTransform) []vtInfo {
 	return out
 }
 
-// buildMonitorConfig reflects the config values that actually drove
-// resolution for this package (filters, strip rules, transforms, ignore
-// patterns) into the report, keyed by which monitor type is active.
 func buildMonitorConfig(cfg *config.Configuration) monitorConfig {
 	common := func(vh config.VersionHandler) monitorConfig {
 		return monitorConfig{
@@ -749,8 +735,6 @@ func shouldRunSchedule(s *config.Schedule, lastChecked time.Time) bool {
 	}
 }
 
-// ensurePR now returns the URL of the PR it created or found (if any), so
-// the caller can surface it in the report.
 func ensurePR(
 	ctx context.Context,
 	gh *github.Client,
@@ -794,7 +778,7 @@ func ensurePR(
 
 	if prExists {
 		if sequential {
-			log.Info("Sequential mode: open PR already exists, skipping")
+			log.Debug("Sequential mode: open PR already exists, skipping")
 			return prURL, nil, nil
 		}
 
@@ -806,7 +790,7 @@ func ensurePR(
 		existingFile = remoteFile
 		remoteContent, _ := remoteFile.GetContent()
 		if remoteContent == string(content) {
-			log.Info("content already matches branch and PR is open, nothing to do")
+			log.Debug("content already matches branch and PR is open, nothing to do")
 			return prURL, nil, nil
 		}
 	}
@@ -822,7 +806,7 @@ func ensurePR(
 		}
 
 		if sequential {
-			log.Info("open PR exists for package, skipping (sequential)")
+			log.Debug("open PR exists for package, skipping (sequential)")
 			return pr.GetHTMLURL(), nil, nil
 		}
 
@@ -834,7 +818,7 @@ func ensurePR(
 			}
 		}
 		if !hasAutomationLabel {
-			log.Info("open PR missing automation label, skipping",
+			log.Debug("open PR missing automation label, skipping",
 				"number", pr.GetNumber(),
 				"title", pr.GetTitle(),
 			)
@@ -902,7 +886,7 @@ func ensurePR(
 		}
 
 		if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
-			log.Info("open PR version is same or newer, skipping",
+			log.Debug("open PR version is same or newer, skipping",
 				"number", pr.GetNumber(),
 				"pr_version", remoteCfg.Package.Version,
 				"new_version", result.Version,
@@ -1096,9 +1080,6 @@ func main() {
 	awsSecretKeyFlag := flag.String("aws-secret-key", "", "AWS secret access key")
 	awsEndpointFlag := flag.String("aws-endpoint", "", "Custom S3 endpoint URL")
 
-	jsonOutputFlag := flag.Bool("json", false, "Print a Renovate-style structured JSON report to stdout")
-	jsonOutputFileFlag := flag.String("json-output-file", "", "Also write the JSON report to this path")
-
 	flag.Parse()
 
 	var logLevel slog.Level
@@ -1139,6 +1120,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	configPaths := make([]string, len(discoveredConfigs))
+	for i, c := range discoveredConfigs {
+		configPaths[i] = c.Path
+	}
+	log.Info("Discovered melange configs with updates enabled",
+		"count", len(discoveredConfigs),
+		"paths", configPaths,
+	)
+
 	awsOpts := awsOptions{
 		Bucket:    *s3BucketFlag,
 		Region:    *awsRegionFlag,
@@ -1150,8 +1140,8 @@ func main() {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(*concurrencyFlag)
 
-	var successCount int64
-	var failureCount int64
+	var successCount atomic.Int64
+	var failureCount atomic.Int64
 
 	var reportMu sync.Mutex
 	var report []renovatePackageFile
@@ -1161,7 +1151,7 @@ func main() {
 			dep, err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
-				atomic.AddInt64(&failureCount, 1)
+				failureCount.Add(1)
 				if dep == nil {
 					dep = &renovateDep{
 						DepName:     item.Config.Package.Name,
@@ -1174,7 +1164,7 @@ func main() {
 					dep.Warnings = append(dep.Warnings, err.Error())
 				}
 			} else {
-				atomic.AddInt64(&successCount, 1)
+				successCount.Add(1)
 			}
 
 			reportMu.Lock()
@@ -1195,38 +1185,24 @@ func main() {
 
 	log.Info("Melange-renovator finished processing all discovered config files",
 		"total", len(discoveredConfigs),
-		"succeeded", atomic.LoadInt64(&successCount),
-		"failed", atomic.LoadInt64(&failureCount),
+		"succeeded", successCount.Load(),
+		"failed", failureCount.Load(),
 	)
 
 	sort.Slice(report, func(i, j int) bool {
 		return report[i].PackageFile < report[j].PackageFile
 	})
 
-	if *jsonOutputFlag || *jsonOutputFileFlag != "" {
-		data, err := json.MarshalIndent(report, "", "  ")
-		if err != nil {
-			log.Error("failed to marshal JSON report", "error", err)
-			os.Exit(1)
-		}
-
-		if *jsonOutputFlag {
-			fmt.Println(string(data))
-		}
-
-		if *jsonOutputFileFlag != "" {
-			if err := os.WriteFile(*jsonOutputFileFlag, data, 0644); err != nil {
-				log.Error("failed to write JSON report to file", "path", *jsonOutputFileFlag, "error", err)
-				os.Exit(1)
-			}
-			log.Info("wrote JSON report", "path", *jsonOutputFileFlag)
-		}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		log.Error("failed to marshal JSON report", "error", err)
+		os.Exit(1)
 	}
+
+	fmt.Println(string(data))
+
 }
 
-// run resolves the latest upstream version for a single package, opens or
-// updates a PR if needed, and always returns a renovateDep describing what
-// it found/did — even on error, so callers can still emit a report entry.
 func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
@@ -1293,7 +1269,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		}
 
 		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
-			log.Info("Skipping config: not due per schedule",
+			log.Debug("Skipping config: not due per schedule",
 				"schedule", cfg.Update.Schedule,
 				"schedule_reason", cfg.Update.Schedule.Reason,
 				"last_checked", pkgState.LastChecked,
@@ -1337,12 +1313,11 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 
 	if result.TagsSkipped > 0 {
 		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
-			"%d of %d upstream versions were filtered out by prefix/contains/ignore-regex rules or failed APK version parsing (rerun with -log-level=debug for details)",
+			"%d of %d upstream versions were filtered out by prefix/contains/ignore-regex rules or failed APK version parsing (run with -log-level=debug for details)",
 			result.TagsSkipped, result.TagsConsidered))
 	}
 
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
-		log.Info("Package is up to date")
 		dep.FixedVersion = cfg.Package.Version
 		dep.UpdateAvailable = false
 		if s3Client != nil {
@@ -1351,7 +1326,6 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		return dep, nil
 	}
 
-	log.Info("Update is available", "resolved_version", result.Version)
 	dep.UpdateAvailable = true
 
 	prBranch := fmt.Sprintf("update-%s", cfg.Package.Name)
