@@ -119,7 +119,6 @@ type scheduleInfo struct {
 type renovateDep struct {
 	DepName         string        `json:"depName"`
 	PackageName     string        `json:"packageName"`
-	ConfigPath      string        `json:"packageFile"`
 	Monitor         monitorConfig `json:"monitor"`
 	Schedule        *scheduleInfo `json:"schedule,omitempty"`
 	CurrentVersion  string        `json:"currentVersion"`
@@ -1156,12 +1155,11 @@ func main() {
 					dep = &renovateDep{
 						DepName:     item.Config.Package.Name,
 						PackageName: item.Config.Package.Name,
-						ConfigPath:  item.Path,
 						Monitor:     buildMonitorConfig(item.Config),
-						Warnings:    []string{err.Error()},
+						Skipped:     true,
+						SkipReason:  err.Error(),
+						Warnings:    []string{},
 					}
-				} else {
-					dep.Warnings = append(dep.Warnings, err.Error())
 				}
 			} else {
 				successCount.Add(1)
@@ -1200,7 +1198,6 @@ func main() {
 	}
 
 	fmt.Println(string(data))
-
 }
 
 func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) (*renovateDep, error) {
@@ -1214,7 +1211,6 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 	dep := &renovateDep{
 		DepName:        cfg.Package.Name,
 		PackageName:    cfg.Package.Name,
-		ConfigPath:     filePath,
 		Monitor:        buildMonitorConfig(cfg),
 		CurrentVersion: cfg.Package.Version,
 		Warnings:       []string{},
