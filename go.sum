@@ -1,9 +1,9 @@
-chainguard.dev/apko v1.2.28 h1:TH11uzmV9Pl9yGMU48g2v3ZwC1gfZNu1EJC1ilsNbXs=
-chainguard.dev/apko v1.2.28/go.mod h1:6FLHpIBilf8M7mruL11sTZ8gvMiFKHTOLhU2ss1eJEs=
+chainguard.dev/apko v1.2.29 h1:qB8mP6qhKpKOCvTGPjs0eX/9AiNc+ty+DU6qbG2wtDs=
+chainguard.dev/apko v1.2.29/go.mod h1:6FLHpIBilf8M7mruL11sTZ8gvMiFKHTOLhU2ss1eJEs=
 chainguard.dev/go-grpc-kit v0.17.17 h1:Jwhc0zyUwQbC2hNcsi+YMeUX/JUnM+dXVCkTw6wtPzs=
 chainguard.dev/go-grpc-kit v0.17.17/go.mod h1:qn0meP6RtrbLicE1bgBZnnVU9dvX95eLs0x0T6kZ+b4=
-chainguard.dev/melange v0.56.3 h1:Q04ZTGoqEn5t2pnV6/2HqRCUAIaSB0bgklZg4xDWYbI=
-chainguard.dev/melange v0.56.3/go.mod h1:ky58gu9et0Lj+JDauGmhqLPHHZTSv+9dCr0xFa1dldw=
+chainguard.dev/melange v0.56.4 h1:uR7lHkRI1nMugJuCgLPyFJuJMFffPc3mw/M/+Ide0DU=
+chainguard.dev/melange v0.56.4/go.mod h1:ljivY0UrwBt96fAH0f8QhKTUrtLCDwvbHBHl0WL745g=
 chainguard.dev/sdk v0.1.140 h1:9rV+7BG70uP+yqFC5IvU/f/fAleJ6kRdALXYMu29xZ0=
 chainguard.dev/sdk v0.1.140/go.mod h1:hwsZl3o558o1R4d8hXrIYHZ6E9lCAXJgeVXQMnV5bRM=
 cloud.google.com/go/auth v0.21.0 h1:g/QwYfYb2Ai6HH8oomAOyBaIHLbscZ4+T/F/f5JZHkE=
@@ -86,8 +86,8 @@ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/docker/cli v29.6.1+incompatible h1:oO7F4nn3Ovr/5TlfTUWFbMwBSS/B7Xs6Epv26gBrUP8=
-github.com/docker/cli v29.6.1+incompatible/go.mod h1:JLrzqnKDaYBop7H2jaqPtU4hHvMKP+vjCwu2uszcLI8=
+github.com/docker/cli v29.6.2+incompatible h1:/bjePvcbbFTnRrMfWJBY7AjfICdsiLVgHn6LwTVOcqw=
+github.com/docker/cli v29.6.2+incompatible/go.mod h1:JLrzqnKDaYBop7H2jaqPtU4hHvMKP+vjCwu2uszcLI8=
 github.com/docker/docker-credential-helpers v0.9.8 h1:bIREROb7So6PRlq6KTtdS9MPEjC29OQRkFNlvK2OX8Q=
 github.com/docker/docker-credential-helpers v0.9.8/go.mod h1:v1S+hepowrQXITkEfw6o4+BMbGot02wiKpzWhGUZK6c=
 github.com/dprotaso/go-yit v0.0.0-20250513224043-18a80f8f6df4 h1:JzpdVajvTuXQXL10D0vId1ZcW9alSJ3H0CnZczzz4ec=

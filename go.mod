@@ -3,8 +3,8 @@ module github.com/d4rkfella/melange-renovator
 go 1.26.2
 
 require (
-	chainguard.dev/apko v1.2.28
-	chainguard.dev/melange v0.56.3
+	chainguard.dev/apko v1.2.29
+	chainguard.dev/melange v0.56.4
 	github.com/aws/aws-sdk-go-v2 v1.43.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.31
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.30
@@ -49,7 +49,7 @@ require (
 	github.com/cloudflare/circl v1.6.4 // indirect
 	github.com/common-nighthawk/go-figure v0.0.0-20210622060536-734e95fb86be // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
-	github.com/docker/cli v29.6.1+incompatible // indirect
+	github.com/docker/cli v29.6.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.8 // indirect
 	github.com/dprotaso/go-yit v0.0.0-20250513224043-18a80f8f6df4 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
