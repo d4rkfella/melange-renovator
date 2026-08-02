@@ -147,7 +147,6 @@ func ensurePR(
 	sequential bool,
 	dryRun bool,
 	forceRebase bool,
-	token string,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 	var closedSuperseded []int
@@ -336,14 +335,12 @@ func ensurePR(
 		return "", nil, fmt.Errorf("getting repo info: %w", err)
 	}
 	defaultBranch := repoInfo.GetDefaultBranch()
-	cloneURL := repoInfo.GetCloneURL()
 
-	pushed, err := pushFileWithRetry(ctx, cloneURL, token, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle, 3)
-	if err != nil {
-		return "", nil, fmt.Errorf("pushing update to %s: %w", prBranch, err)
-	}
-	if !pushed {
-		log.Debug("git reports nothing to commit", "branch", prBranch)
+	if _, err := commitFileWithRetry(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
+		if errors.Is(err, errBranchModifiedByHuman) {
+			return prURL, closedSuperseded, nil
+		}
+		return "", nil, fmt.Errorf("committing update to %s: %w", prBranch, err)
 	}
 
 	if !prExists {
@@ -351,10 +348,10 @@ func ensurePR(
 		createErr := withRetry(ctx, 3, func() error {
 			var e error
 			newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-				Title: github.Ptr(prTitle),
-				Body:  github.Ptr(prBody),
-				Head:  github.Ptr(prBranch),
-				Base:  github.Ptr(defaultBranch),
+				Title: new(prTitle),
+				Body:  new(prBody),
+				Head:  new(prBranch),
+				Base:  new(defaultBranch),
 			})
 			return e
 		})

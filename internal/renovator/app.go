@@ -417,7 +417,6 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
 		checks.RebasePR[prBranch] || checks.RebaseAll,
-		os.Getenv("GITHUB_TOKEN"),
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
