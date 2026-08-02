@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 
+	"github.com/chainguard-dev/clog"
 	renovator "github.com/d4rkfella/melange-renovator/internal/renovator"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -37,8 +41,27 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stderr, "Starting melange-renovator version=%s commit=%s build_date=%s\n", version, commitSHA, buildDate)
-			renovator.Run(newOptionsFromViper(v))
+			var logLevel slog.Level
+			if err := logLevel.UnmarshalText([]byte(v.GetString("log-level"))); err != nil {
+				logLevel = slog.LevelInfo
+			}
+
+			logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+			ctx := clog.WithLogger(context.Background(), logger)
+			log := clog.FromContext(ctx)
+
+			log.Info("Starting melange-renovator",
+				"version", version,
+				"commit", commitSHA,
+				"build_date", buildDate,
+			)
+			log.Info("Runtime Environment",
+				"GOOS", runtime.GOOS,
+				"GOARCH", runtime.GOARCH,
+				"GoVersion", runtime.Version(),
+			)
+
+			renovator.RunContext(ctx, newOptionsFromViper(v))
 			return nil
 		},
 	}

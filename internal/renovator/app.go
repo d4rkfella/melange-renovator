@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -114,16 +112,12 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 
 // Run executes the melange-renovator workflow using the typed command options.
 func Run(opts Options) {
-	var logLevel slog.Level
-	if err := logLevel.UnmarshalText([]byte(opts.LogLevel)); err != nil {
-		logLevel = slog.LevelInfo
-	}
+	RunContext(context.Background(), opts)
+}
 
-	logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
-	ctx := clog.WithLogger(context.Background(), logger)
+// RunContext executes the melange-renovator workflow using the provided context.
+func RunContext(ctx context.Context, opts Options) {
 	log := clog.FromContext(ctx)
-
-	log.Info("Runtime Environment", "GOOS", runtime.GOOS, "GOARCH", runtime.GOARCH, "GoVersion", runtime.Version())
 
 	if !opts.DryRun {
 		if opts.S3Bucket == "" {
