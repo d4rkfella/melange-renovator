@@ -168,7 +168,8 @@ func Run(opts Options) {
 		Endpoint:  opts.AWSEndpoint,
 	}
 
-	g, ctx := errgroup.WithContext(ctx)
+	baseCtx := ctx
+	g, ctx := errgroup.WithContext(baseCtx)
 	g.SetLimit(opts.Concurrency)
 
 	var successCount atomic.Int64
@@ -189,7 +190,7 @@ func Run(opts Options) {
 			os.Exit(1)
 		}
 		repoOwner, repoName = repoParts[0], repoParts[1]
-		_, dashboardStartBody, checks, err = readDashboard(ctx, ghForDashboard, repoOwner, repoName)
+		_, dashboardStartBody, checks, err = readDashboard(baseCtx, ghForDashboard, repoOwner, repoName)
 		if err != nil {
 			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
 		}
@@ -239,7 +240,7 @@ func Run(opts Options) {
 	)
 
 	if !opts.DryRun {
-		if err := ensureDependencyDashboard(ctx, ghForDashboard, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
+		if err := ensureDependencyDashboard(baseCtx, ghForDashboard, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
 			log.Warn("failed to update dependency dashboard", "error", err)
 		}
 	}
