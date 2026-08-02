@@ -1,27 +1,44 @@
-name: Release
+name: Dev Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
 
 jobs:
-  create-release:
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
+  dev-release:
+    name: Build and publish dev release
     runs-on: ubuntu-24.04
+
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v.7.0.1
         with:
           fetch-depth: 0
 
+      - name: Create pre-release tag
+        id: tag
+        run: |
+          TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
+          TAG="v0.0.0-dev.${TIMESTAMP}"
+
+          echo "Creating tag: ${TAG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0

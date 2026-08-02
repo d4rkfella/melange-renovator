@@ -1,6 +1,6 @@
 module github.com/d4rkfella/melange-renovator
 
-go 1.26.2
+go 1.26.5
 
 require (
 	chainguard.dev/apko v1.2.29
