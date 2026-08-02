@@ -160,8 +160,23 @@ var (
 	buildDate = "unknown"
 )
 
-var checkedMarkerRe = regexp.MustCompile(`- \[x] <!-- ([a-zA-Z0-9_-]+)=([^\s]+) -->`)
+var anyCheckboxRe = regexp.MustCompile(`- \[( |x)] <!-- ([^>]+?) -->`)
 var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[\sx])] <!-- rebase-check -->`)
+
+// allCheckedMarkers extracts every checked checkbox's hidden marker string
+// from a dashboard body, regardless of whether it's a keyed marker
+// ("retry-package=foo") or a bulk one ("rebase-all-open-prs"). Used both to
+// categorize a body's checks and, in ensureDependencyDashboard, to diff two
+// bodies against each other to catch checks that happened mid-run.
+func allCheckedMarkers(body string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range anyCheckboxRe.FindAllStringSubmatch(body, -1) {
+		if m[1] == "x" {
+			out[m[2]] = true
+		}
+	}
+	return out
+}
 
 func shouldSkipVersion(ctx context.Context, tag string, versionHandler config.VersionHandler, compiledIgnore []*regexp.Regexp) bool {
 	log := clog.FromContext(ctx)
@@ -752,17 +767,6 @@ func shouldRunSchedule(s *config.Schedule, lastChecked time.Time) bool {
 	}
 }
 
-func isRefAlreadyExistsErr(err error) bool {
-	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok {
-		for _, e := range ghErr.Errors {
-			if e.Code == "already_exists" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func isPRAlreadyExistsErr(err error) bool {
 	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok {
 		if ghErr.Message == "Validation Failed" {
@@ -895,6 +899,7 @@ func ensurePR(
 	sequential bool,
 	dryRun bool,
 	forceRebase bool,
+	token string,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 	var closedSuperseded []int
@@ -946,7 +951,6 @@ func ensurePR(
 
 	prExists := openPR != nil
 	var prURL string
-	var existingFile *github.RepositoryContent
 
 	if prExists {
 		prURL = openPR.GetHTMLURL()
@@ -980,7 +984,6 @@ func ensurePR(
 		if err != nil {
 			return "", nil, fmt.Errorf("fetching file from PR branch: %w", err)
 		}
-		existingFile = remoteFile
 
 		remoteContent, _ := remoteFile.GetContent()
 		rebaseRequested := forceRebase || isRebaseRequested(openPR.GetBody())
@@ -1085,45 +1088,14 @@ func ensurePR(
 		return "", nil, fmt.Errorf("getting repo info: %w", err)
 	}
 	defaultBranch := repoInfo.GetDefaultBranch()
+	cloneURL := repoInfo.GetCloneURL()
 
-	ref, _, err := gh.Git.GetRef(ctx, owner, repo, "refs/heads/"+defaultBranch)
+	pushed, err := pushFileWithRetry(ctx, cloneURL, token, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle, 3)
 	if err != nil {
-		return "", nil, fmt.Errorf("getting default branch ref: %w", err)
+		return "", nil, fmt.Errorf("pushing update to %s: %w", prBranch, err)
 	}
-	headSHA := ref.Object.GetSHA()
-
-	if !branchExists {
-		_, _, err = gh.Git.CreateRef(ctx, owner, repo, github.CreateRef{
-			Ref: "refs/heads/" + prBranch,
-			SHA: headSHA,
-		})
-		if err != nil && !isRefAlreadyExistsErr(err) {
-			return "", nil, fmt.Errorf("creating branch: %w", err)
-		}
-	}
-
-	if existingFile == nil {
-		var remoteFile *github.RepositoryContent
-		err = withRetry(ctx, 3, func() error {
-			var e error
-			remoteFile, _, _, e = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-				&github.RepositoryContentGetOptions{Ref: prBranch})
-			return e
-		})
-		if err != nil {
-			return "", nil, fmt.Errorf("fetching file from branch %s: %w", prBranch, err)
-		}
-		existingFile = remoteFile
-	}
-
-	if _, _, err = gh.Repositories.UpdateFile(ctx, owner, repo, fileAPIPath,
-		&github.RepositoryContentFileOptions{
-			Message: github.Ptr(prTitle),
-			Content: content,
-			SHA:     existingFile.SHA,
-			Branch:  github.Ptr(prBranch),
-		}); err != nil {
-		return "", nil, fmt.Errorf("updating file: %w", err)
+	if !pushed {
+		log.Debug("git reports nothing to commit", "branch", prBranch)
 	}
 
 	if !prExists {
@@ -1256,33 +1228,34 @@ func parseDashboardBody(body string) dashboardChecks {
 		RetryPackage: map[string]bool{},
 		RebasePR:     map[string]bool{},
 	}
-	for _, m := range checkedMarkerRe.FindAllStringSubmatch(body, -1) {
-		action, name := m[1], m[2]
-		switch action {
-		case "retry-package":
-			checks.RetryPackage[name] = true
-		case "rebase-branch":
-			checks.RebasePR[name] = true
+	for marker := range allCheckedMarkers(body) {
+		switch {
+		case strings.HasPrefix(marker, "retry-package="):
+			checks.RetryPackage[strings.TrimPrefix(marker, "retry-package=")] = true
+		case strings.HasPrefix(marker, "rebase-branch="):
+			checks.RebasePR[strings.TrimPrefix(marker, "rebase-branch=")] = true
+		case marker == "retry-all-errored-prs":
+			checks.RetryAll = true
+		case marker == "rebase-all-open-prs":
+			checks.RebaseAll = true
 		}
 	}
-	checks.RetryAll = strings.Contains(body, checkboxLine("retry-all-errored-prs", true))
-	checks.RebaseAll = strings.Contains(body, checkboxLine("rebase-all-open-prs", true))
 	return checks
 }
 
-func readDashboard(ctx context.Context, gh *github.Client, owner, repo string) (issueNumber int, checks dashboardChecks, err error) {
+func readDashboard(ctx context.Context, gh *github.Client, owner, repo string) (issueNumber int, startBody string, checks dashboardChecks, err error) {
 	issues, _, err := gh.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
 		State: "open",
 	})
 	if err != nil {
-		return 0, dashboardChecks{}, fmt.Errorf("listing dashboard issue: %w", err)
+		return 0, "", dashboardChecks{}, fmt.Errorf("listing dashboard issue: %w", err)
 	}
 	for _, iss := range issues {
 		if iss.GetTitle() == dashboardTitle {
-			return iss.GetNumber(), parseDashboardBody(iss.GetBody()), nil
+			return iss.GetNumber(), iss.GetBody(), parseDashboardBody(iss.GetBody()), nil
 		}
 	}
-	return 0, dashboardChecks{}, nil
+	return 0, "", dashboardChecks{}, nil
 }
 
 func prBranchName(pkgName string) string {
@@ -1378,7 +1351,7 @@ func renderDashboardBody(report []renovatePackageFile) string {
 	return b.String()
 }
 
-func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, repo string, report []renovatePackageFile, dryRun bool, autoclose bool) error {
+func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, repo string, report []renovatePackageFile, dryRun bool, autoclose bool, startBody string) error {
 	log := clog.FromContext(ctx)
 
 	hasErrors := false
@@ -1449,7 +1422,30 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 		return nil
 	}
 
-	body := renderDashboardBody(report)
+	freshBody := renderDashboardBody(report)
+
+	if existing != nil && existing.GetState() == "open" && freshBody == startBody {
+		log.Debug("No changes to dependency dashboard issue needed")
+		return nil
+	}
+
+	if existing != nil {
+		liveChecked := allCheckedMarkers(existing.GetBody())
+		startChecked := allCheckedMarkers(startBody)
+		for marker := range liveChecked {
+			if startChecked[marker] {
+				continue
+			}
+			uncheckedPrefix := checkboxLine(marker, false)
+			checkedPrefix := checkboxLine(marker, true)
+			if strings.Contains(freshBody, uncheckedPrefix) {
+				freshBody = strings.Replace(freshBody, uncheckedPrefix, checkedPrefix, 1)
+				log.Debug("preserving mid-run checkbox check into next dashboard body", "marker", marker)
+			}
+		}
+	}
+
+	body := freshBody
 
 	if dryRun {
 		log.Info("DRY RUN: would create/update Dependency Dashboard issue", "body_preview", truncateString(body, 200))
@@ -1558,6 +1554,7 @@ func main() {
 	var report []renovatePackageFile
 
 	var checks dashboardChecks
+	var dashboardStartBody string
 	var ghForDashboard *github.Client
 	var repoOwner, repoName string
 	if !*dryRunFlag {
@@ -1568,7 +1565,7 @@ func main() {
 			os.Exit(1)
 		}
 		repoOwner, repoName = repoParts[0], repoParts[1]
-		_, checks, err = readDashboard(ctx, ghForDashboard, repoOwner, repoName)
+		_, dashboardStartBody, checks, err = readDashboard(ctx, ghForDashboard, repoOwner, repoName)
 		if err != nil {
 			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
 		}
@@ -1618,7 +1615,7 @@ func main() {
 	)
 
 	if !*dryRunFlag {
-		if err := ensureDependencyDashboard(ctx, ghForDashboard, repoOwner, repoName, report, *dryRunFlag, false); err != nil {
+		if err := ensureDependencyDashboard(ctx, ghForDashboard, repoOwner, repoName, report, *dryRunFlag, false, dashboardStartBody); err != nil {
 			log.Warn("failed to update dependency dashboard", "error", err)
 		}
 	}
@@ -1801,6 +1798,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
 		checks.RebasePR[prBranch] || checks.RebaseAll,
+		os.Getenv("GITHUB_TOKEN"),
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
