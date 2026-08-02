@@ -123,7 +123,6 @@ func Run(opts Options) {
 	ctx := clog.WithLogger(context.Background(), logger)
 	log := clog.FromContext(ctx)
 
-	log.Info("Starting melange-renovator", "version", version, "commit", commitSHA, "build_date", buildDate)
 	log.Info("Runtime Environment", "GOOS", runtime.GOOS, "GOARCH", runtime.GOARCH, "GoVersion", runtime.Version())
 
 	if !opts.DryRun {

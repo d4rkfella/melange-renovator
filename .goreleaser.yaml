@@ -3,6 +3,8 @@ project_name: melange-renovator
 
 builds:
   - id: melange-build
+    main: ./cmd/melange-renovator
+    binary: melange-renovator
     env:
       - CGO_ENABLED=0
     goos:
@@ -51,7 +53,7 @@ changelog:
 snapshot:
   version_template: "{{ incpatch .Version }}-dev.{{ .Timestamp }}"
 
-dockers_v2:
+dockers:
   - ids:
       - melange-build
     images:

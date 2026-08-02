@@ -10,6 +10,12 @@ import (
 	"github.com/spf13/viper"
 )
 
+var (
+	version   = "dev"
+	commitSHA = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
 	v := viper.New()
 	v.SetEnvPrefix("MELANGE_RENOVATOR")
@@ -31,6 +37,7 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(os.Stderr, "Starting melange-renovator version=%s commit=%s build_date=%s\n", version, commitSHA, buildDate)
 			renovator.Run(newOptionsFromViper(v))
 			return nil
 		},

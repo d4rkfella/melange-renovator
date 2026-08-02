@@ -120,11 +120,5 @@ type renovatePackageFile struct {
 	Deps        []renovateDep `json:"deps"`
 }
 
-var (
-	version   = "dev"
-	commitSHA = "unknown"
-	buildDate = "unknown"
-)
-
 var anyCheckboxRe = regexp.MustCompile(`- \[( |x)] <!-- ([^>]+?) -->`)
 var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[\sx])] <!-- rebase-check -->`)
