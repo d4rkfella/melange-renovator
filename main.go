@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -41,6 +43,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const reopenThreshold = 7 * 24 * time.Hour
+
+const dashboardTitle = "Renovate Dashboard"
+
+const prRebaseControl = "\n\n---\n\n - [ ] <!-- rebase-check -->If you want to force a re-push of this PR (e.g. to retrigger CI), check this box\n"
+
 type packageState struct {
 	LastVersion string    `json:"last_version"`
 	LastChecked time.Time `json:"last_checked"`
@@ -49,6 +57,13 @@ type packageState struct {
 type discoveredConfig struct {
 	Path   string
 	Config *config.Configuration
+}
+
+type dashboardChecks struct {
+	RetryPackage map[string]bool
+	RebasePR     map[string]bool
+	RetryAll     bool
+	RebaseAll    bool
 }
 
 type awsOptions struct {
@@ -144,6 +159,9 @@ var (
 	commitSHA = "unknown"
 	buildDate = "unknown"
 )
+
+var checkedMarkerRe = regexp.MustCompile(`- \[x] <!-- ([a-zA-Z0-9_-]+)=([^\s]+) -->`)
+var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[\sx])] <!-- rebase-check -->`)
 
 func shouldSkipVersion(ctx context.Context, tag string, versionHandler config.VersionHandler, compiledIgnore []*regexp.Regexp) bool {
 	log := clog.FromContext(ctx)
@@ -734,6 +752,138 @@ func shouldRunSchedule(s *config.Schedule, lastChecked time.Time) bool {
 	}
 }
 
+func isRefAlreadyExistsErr(err error) bool {
+	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok {
+		for _, e := range ghErr.Errors {
+			if e.Code == "already_exists" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isPRAlreadyExistsErr(err error) bool {
+	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok {
+		if ghErr.Message == "Validation Failed" {
+			for _, e := range ghErr.Errors {
+				if strings.HasPrefix(e.Message, "A pull request already exists") {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func is5xxErr(err error) bool {
+	if ghErr, ok := errors.AsType[*github.ErrorResponse](err); ok && ghErr.Response != nil {
+		return ghErr.Response.StatusCode >= 500
+	}
+	return false
+}
+
+func isRateLimitErr(err error) (retryAfter time.Duration, ok bool) {
+	if rle, ok := errors.AsType[*github.RateLimitError](err); ok {
+		return time.Until(rle.Rate.Reset.Time), true
+	}
+	if arle, ok := errors.AsType[*github.AbuseRateLimitError](err); ok {
+		if arle.RetryAfter != nil {
+			return *arle.RetryAfter, true
+		}
+		return 60 * time.Second, true
+	}
+	return 0, false
+}
+
+func withRetry(ctx context.Context, maxAttempts int, fn func() error) error {
+	log := clog.FromContext(ctx)
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		wait, isRateLimit := isRateLimitErr(lastErr)
+		if !isRateLimit || attempt == maxAttempts {
+			return lastErr
+		}
+		if wait <= 0 || wait > 15*time.Minute {
+			wait = 30 * time.Second
+		}
+		log.Warn("rate limited, backing off",
+			"attempt", attempt, "wait", wait, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return lastErr
+}
+
+func tryReuseClosedPR(ctx context.Context, gh *github.Client, owner, repo, prBranch string) (*github.PullRequest, error) {
+	log := clog.FromContext(ctx)
+
+	prs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
+		State: "closed",
+		Head:  fmt.Sprintf("%s:%s", owner, prBranch),
+		ListOptions: github.ListOptions{
+			PerPage: 5,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing closed PRs for branch: %w", err)
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+
+	candidate := prs[0]
+	hasAutomationLabel := false
+	for _, l := range candidate.Labels {
+		if l.GetName() == "automated pr" {
+			hasAutomationLabel = true
+			break
+		}
+	}
+	if !hasAutomationLabel {
+		log.Debug("closed PR on branch has no automation label, not reusing",
+			"number", candidate.GetNumber())
+		return nil, nil
+	}
+	if candidate.MergedAt != nil {
+		return nil, nil
+	}
+	if candidate.ClosedAt == nil || time.Since(candidate.ClosedAt.Time) > reopenThreshold {
+		log.Debug("closed PR too old to reopen, will create fresh",
+			"number", candidate.GetNumber())
+		return nil, nil
+	}
+
+	log.Info("found recently auto-closed PR for branch, reopening instead of creating new",
+		"number", candidate.GetNumber(), "closed_at", candidate.GetClosedAt())
+
+	reopened, _, err := gh.PullRequests.Edit(ctx, owner, repo, candidate.GetNumber(), &github.PullRequest{
+		State: github.Ptr("open"),
+	})
+	if err != nil {
+		log.Warn("failed to reopen autoclosed PR, will create new one instead",
+			"number", candidate.GetNumber(), "error", err)
+		return nil, nil
+	}
+	return reopened, nil
+}
+
+func fingerprint(parts ...string) string {
+	h := sha256.New()
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func ensurePR(
 	ctx context.Context,
 	gh *github.Client,
@@ -744,6 +894,7 @@ func ensurePR(
 	prBranch, prTitle, prBody string,
 	sequential bool,
 	dryRun bool,
+	forceRebase bool,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 	var closedSuperseded []int
@@ -752,180 +903,177 @@ func ensurePR(
 	if err != nil {
 		return "", nil, fmt.Errorf("reading file: %w", err)
 	}
-
 	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
-	var existingFile *github.RepositoryContent
 
-	_, resp, err := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
-	branchExists := err == nil
-	if !branchExists && resp != nil && resp.StatusCode != 404 {
-		return "", nil, fmt.Errorf("fetching branch info (status %d): %w", resp.StatusCode, err)
+	var branchExists bool
+	err = withRetry(ctx, 3, func() error {
+		_, resp, e := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
+		branchExists = e == nil
+		if !branchExists && (resp == nil || resp.StatusCode != 404) {
+			return e
+		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("checking branch existence: %w", err)
 	}
 
-	branchPRs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
-		State: "open",
-		Head:  fmt.Sprintf("%s:%s", owner, prBranch),
+	var branchPRs []*github.PullRequest
+	err = withRetry(ctx, 3, func() error {
+		var e error
+		branchPRs, _, e = gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
+			State: "open",
+			Head:  fmt.Sprintf("%s:%s", owner, prBranch),
+		})
+		return e
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("checking for existing branch PRs: %w", err)
 	}
-	prExists := len(branchPRs) > 0
-	var prURL string
-	if prExists {
-		prURL = branchPRs[0].GetHTMLURL()
+
+	var openPR *github.PullRequest
+	if len(branchPRs) > 0 {
+		openPR = branchPRs[0]
 	}
 
+	if branchExists && openPR == nil && !dryRun {
+		reused, rErr := tryReuseClosedPR(ctx, gh, owner, repo, prBranch)
+		if rErr != nil {
+			log.Warn("error checking for reusable closed PR, continuing", "error", rErr)
+		}
+		openPR = reused
+	}
+
+	prExists := openPR != nil
+	var prURL string
+	var existingFile *github.RepositoryContent
+
 	if prExists {
+		prURL = openPR.GetHTMLURL()
+
+		repoInfo, _, rErr := gh.Repositories.Get(ctx, owner, repo)
+		if rErr == nil {
+			currentDefault := repoInfo.GetDefaultBranch()
+			if openPR.GetBase().GetRef() != "" && openPR.GetBase().GetRef() != currentDefault && !dryRun {
+				log.Info("PR base branch has drifted, retargeting",
+					"pr", openPR.GetNumber(), "old_base", openPR.GetBase().GetRef(), "new_base", currentDefault)
+				if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
+					Base: &github.PullRequestBranch{Ref: github.Ptr(currentDefault)},
+				}); uErr != nil {
+					log.Warn("failed to retarget PR base branch", "error", uErr)
+				}
+			}
+		}
+
 		if sequential {
 			log.Debug("Sequential mode: open PR already exists, skipping")
 			return prURL, nil, nil
 		}
 
-		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-			&github.RepositoryContentGetOptions{Ref: prBranch})
+		var remoteFile *github.RepositoryContent
+		err = withRetry(ctx, 3, func() error {
+			var e error
+			remoteFile, _, _, e = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+				&github.RepositoryContentGetOptions{Ref: prBranch})
+			return e
+		})
 		if err != nil {
 			return "", nil, fmt.Errorf("fetching file from PR branch: %w", err)
 		}
 		existingFile = remoteFile
+
 		remoteContent, _ := remoteFile.GetContent()
-		if remoteContent == string(content) {
-			log.Debug("content already matches branch and PR is open, nothing to do")
+		rebaseRequested := forceRebase || isRebaseRequested(openPR.GetBody())
+
+		oldFP := fingerprint(remoteContent, openPR.GetTitle())
+		newFP := fingerprint(string(content), prTitle)
+		if oldFP == newFP && !rebaseRequested {
+			log.Debug("content and title unchanged, nothing to do")
 			return prURL, nil, nil
 		}
+		if rebaseRequested {
+			log.Debug("rebase requested, forcing update despite unchanged content", "pr", openPR.GetNumber())
+		}
 	}
 
-	prs, _, err := gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
-	if err != nil {
-		return "", nil, fmt.Errorf("listing all open PRs: %w", err)
-	}
-
-	for _, pr := range prs {
-		if !strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
-			continue
+	if !sequential {
+		var allPRs []*github.PullRequest
+		err = withRetry(ctx, 3, func() error {
+			var e error
+			allPRs, _, e = gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
+			return e
+		})
+		if err != nil {
+			return "", nil, fmt.Errorf("listing all open PRs: %w", err)
 		}
 
-		if sequential {
-			log.Debug("open PR exists for package, skipping (sequential)")
-			return pr.GetHTMLURL(), nil, nil
-		}
-
-		hasAutomationLabel := false
-		for _, label := range pr.Labels {
-			if label.GetName() == "automated pr" {
-				hasAutomationLabel = true
-				break
+		for _, pr := range allPRs {
+			if !strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
+				continue
 			}
-		}
-		if !hasAutomationLabel {
-			log.Debug("open PR missing automation label, skipping",
-				"number", pr.GetNumber(),
-				"title", pr.GetTitle(),
-			)
-			continue
-		}
-
-		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-			&github.RepositoryContentGetOptions{Ref: prBranch})
-		if err != nil {
-			log.Warn("could not fetch config from PR branch, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
-
-		remoteContent, err := remoteFile.GetContent()
-		if err != nil {
-			log.Warn("could not decode config from PR branch, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
-
-		tmp, err := os.CreateTemp("", "melange-*.yaml")
-		if err != nil {
-			log.Warn("could not create temp file for config parsing, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
-		defer func() {
-			if err := os.Remove(tmp.Name()); err != nil {
-				log.Warn("could not remove temp file", "path", tmp.Name(), "error", err)
+			hasAutomationLabel := false
+			for _, label := range pr.Labels {
+				if label.GetName() == "automated pr" {
+					hasAutomationLabel = true
+					break
+				}
 			}
-		}()
-
-		if _, err := tmp.WriteString(remoteContent); err != nil {
-			if err := tmp.Close(); err != nil {
-				log.Warn("could not close temp file", "path", tmp.Name(), "error", err)
+			if !hasAutomationLabel {
+				continue
 			}
-			log.Warn("could not write temp file for config parsing, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
-		if err := tmp.Close(); err != nil {
-			log.Warn("could not close temp file for config parsing, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
 
-		remoteCfg, err := config.ParseConfiguration(ctx, tmp.Name())
-		if err != nil {
-			log.Warn("could not parse config from PR branch, skipping supersede check",
-				"number", pr.GetNumber(),
-				"error", err,
-			)
-			continue
-		}
+			remoteFile, _, _, gErr := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+				&github.RepositoryContentGetOptions{Ref: prBranch})
+			if gErr != nil {
+				log.Warn("could not fetch config from PR branch, skipping supersede check",
+					"number", pr.GetNumber(), "error", gErr)
+				continue
+			}
+			remoteContent, cErr := remoteFile.GetContent()
+			if cErr != nil {
+				continue
+			}
 
-		if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
-			log.Debug("open PR version is same or newer, skipping",
-				"number", pr.GetNumber(),
-				"pr_version", remoteCfg.Package.Version,
-				"new_version", result.Version,
-			)
-			continue
-		}
+			tmp, tErr := os.CreateTemp("", "melange-*.yaml")
+			if tErr != nil {
+				continue
+			}
+			tmpName := tmp.Name()
+			_, _ = tmp.WriteString(remoteContent)
+			_ = tmp.Close()
+			remoteCfg, pErr := config.ParseConfiguration(ctx, tmpName)
+			_ = os.Remove(tmpName)
+			if pErr != nil {
+				continue
+			}
 
-		if dryRun {
-			log.Info("DRY RUN: would close superseded PR and open new one",
-				"closing_number", pr.GetNumber(),
-				"closing_version", remoteCfg.Package.Version,
-				"new_version", result.Version,
-			)
+			if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
+				continue
+			}
+
+			if dryRun {
+				log.Info("DRY RUN: would close superseded PR and open new one",
+					"closing_number", pr.GetNumber(), "new_version", result.Version)
+				prExists = false
+				continue
+			}
+
+			if _, _, cErr := gh.Issues.CreateComment(ctx, owner, repo, pr.GetNumber(), &github.IssueComment{
+				Body: github.Ptr(fmt.Sprintf(
+					"This PR has been superseded by a newer version update: **%s**. Closing automatically.",
+					prTitle)),
+			}); cErr != nil {
+				log.Warn("failed to post superseded comment", "number", pr.GetNumber(), "error", cErr)
+			}
+			if _, _, eErr := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
+				State: github.Ptr("closed"),
+			}); eErr != nil {
+				log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", eErr)
+			} else {
+				closedSuperseded = append(closedSuperseded, pr.GetNumber())
+			}
 			prExists = false
-			continue
 		}
-
-		if _, _, err := gh.Issues.CreateComment(ctx, owner, repo, pr.GetNumber(), &github.IssueComment{
-			Body: github.Ptr(fmt.Sprintf(
-				"This PR has been superseded by a newer version update: **%s**. Closing automatically.",
-				prTitle,
-			)),
-		}); err != nil {
-			log.Warn("failed to post superseded comment", "number", pr.GetNumber(), "error", err)
-		}
-
-		log.Info("closing superseded PR",
-			"number", pr.GetNumber(),
-			"pr_version", remoteCfg.Package.Version,
-			"new_version", result.Version,
-		)
-		if _, _, err := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
-			State: github.Ptr("closed"),
-		}); err != nil {
-			log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", err)
-		} else {
-			closedSuperseded = append(closedSuperseded, pr.GetNumber())
-		}
-
-		prExists = false
 	}
 
 	if dryRun {
@@ -949,14 +1097,21 @@ func ensurePR(
 			Ref: "refs/heads/" + prBranch,
 			SHA: headSHA,
 		})
-		if err != nil && !strings.Contains(err.Error(), "already exists") {
+		if err != nil && !isRefAlreadyExistsErr(err) {
 			return "", nil, fmt.Errorf("creating branch: %w", err)
 		}
+	}
 
-		remoteFile, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-			&github.RepositoryContentGetOptions{Ref: prBranch})
+	if existingFile == nil {
+		var remoteFile *github.RepositoryContent
+		err = withRetry(ctx, 3, func() error {
+			var e error
+			remoteFile, _, _, e = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+				&github.RepositoryContentGetOptions{Ref: prBranch})
+			return e
+		})
 		if err != nil {
-			return "", nil, fmt.Errorf("fetching file info from new branch: %w", err)
+			return "", nil, fmt.Errorf("fetching file from branch %s: %w", prBranch, err)
 		}
 		existingFile = remoteFile
 	}
@@ -972,14 +1127,30 @@ func ensurePR(
 	}
 
 	if !prExists {
-		newPR, _, err := gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-			Title: github.Ptr(prTitle),
-			Body:  github.Ptr(prBody),
-			Head:  github.Ptr(prBranch),
-			Base:  github.Ptr(defaultBranch),
+		var newPR *github.PullRequest
+		createErr := withRetry(ctx, 3, func() error {
+			var e error
+			newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
+				Title: github.Ptr(prTitle),
+				Body:  github.Ptr(prBody),
+				Head:  github.Ptr(prBranch),
+				Base:  github.Ptr(defaultBranch),
+			})
+			return e
 		})
-		if err != nil {
-			return "", nil, fmt.Errorf("creating PR: %w", err)
+		if createErr != nil {
+			if isPRAlreadyExistsErr(createErr) {
+				log.Warn("PR was created concurrently by another run, treating as success")
+				return "", closedSuperseded, nil
+			}
+			if is5xxErr(createErr) {
+				log.Warn("server error creating PR, deleting branch so next run starts clean",
+					"branch", prBranch, "error", createErr)
+				if _, dErr := gh.Git.DeleteRef(ctx, owner, repo, "heads/"+prBranch); dErr != nil {
+					log.Warn("failed to delete branch after failed PR creation", "error", dErr)
+				}
+			}
+			return "", nil, fmt.Errorf("creating PR: %w", createErr)
 		}
 
 		if _, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(),
@@ -1068,6 +1239,247 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 	return found, err
 }
 
+func mdComment(s string) string {
+	return fmt.Sprintf("<!-- %s -->", s)
+}
+
+func checkboxLine(marker string, checked bool) string {
+	box := " "
+	if checked {
+		box = "x"
+	}
+	return fmt.Sprintf(" - [%s] %s", box, mdComment(marker))
+}
+
+func parseDashboardBody(body string) dashboardChecks {
+	checks := dashboardChecks{
+		RetryPackage: map[string]bool{},
+		RebasePR:     map[string]bool{},
+	}
+	for _, m := range checkedMarkerRe.FindAllStringSubmatch(body, -1) {
+		action, name := m[1], m[2]
+		switch action {
+		case "retry-package":
+			checks.RetryPackage[name] = true
+		case "rebase-branch":
+			checks.RebasePR[name] = true
+		}
+	}
+	checks.RetryAll = strings.Contains(body, checkboxLine("retry-all-errored-prs", true))
+	checks.RebaseAll = strings.Contains(body, checkboxLine("rebase-all-open-prs", true))
+	return checks
+}
+
+func readDashboard(ctx context.Context, gh *github.Client, owner, repo string) (issueNumber int, checks dashboardChecks, err error) {
+	issues, _, err := gh.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+		State: "open",
+	})
+	if err != nil {
+		return 0, dashboardChecks{}, fmt.Errorf("listing dashboard issue: %w", err)
+	}
+	for _, iss := range issues {
+		if iss.GetTitle() == dashboardTitle {
+			return iss.GetNumber(), parseDashboardBody(iss.GetBody()), nil
+		}
+	}
+	return 0, dashboardChecks{}, nil
+}
+
+func prBranchName(pkgName string) string {
+	return "update-" + pkgName
+}
+
+func renderDashboardBody(report []renovatePackageFile) string {
+	var errored, openPRs, upToDate []renovateDep
+	for _, pf := range report {
+		for _, d := range pf.Deps {
+			switch {
+			case d.Skipped && d.SkipReason != "" && d.SkipReason != "not due per schedule":
+				errored = append(errored, d)
+			case d.PRUrl != "":
+				openPRs = append(openPRs, d)
+			default:
+				upToDate = append(upToDate, d)
+			}
+		}
+	}
+	sortByName := func(s []renovateDep) {
+		sort.Slice(s, func(i, j int) bool { return s[i].PackageName < s[j].PackageName })
+	}
+	sortByName(errored)
+	sortByName(openPRs)
+	sortByName(upToDate)
+
+	var b strings.Builder
+
+	if len(errored) > 0 {
+		b.WriteString("## Errored\n\n")
+		b.WriteString("The following updates encountered an error and will be retried. To force a retry now, check a box below.\n\n")
+		for _, d := range errored {
+			b.WriteString(checkboxLine("retry-package="+d.PackageName, false))
+			fmt.Fprintf(&b, " `%s` — %s\n", d.PackageName, d.SkipReason)
+		}
+		if len(errored) > 1 {
+			b.WriteString(checkboxLine("retry-all-errored-prs", false))
+			b.WriteString(" **Retry all errored updates at once**\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if len(openPRs) > 0 {
+		b.WriteString("## Open\n\n")
+		b.WriteString("The following updates have all been created. To force a retry/rebase of any, check a box below.\n\n")
+		for _, d := range openPRs {
+			branch := prBranchName(d.PackageName)
+			b.WriteString(checkboxLine("rebase-branch="+branch, false))
+			fmt.Fprintf(&b, "[%s/%s package update](%s)\n", d.PackageName, d.ResolvedVersion, d.PRUrl)
+		}
+		if len(openPRs) > 1 {
+			b.WriteString(checkboxLine("rebase-all-open-prs", false))
+			b.WriteString(" **Click on this checkbox to rebase all open PRs at once**\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if len(openPRs) == 0 && len(errored) == 0 {
+		b.WriteString("This repository currently has no open or pending updates.\n\n")
+	}
+
+	b.WriteString("## Detected Dependencies\n\n")
+	totalDeps := 0
+	for _, pf := range report {
+		totalDeps += len(pf.Deps)
+	}
+	if totalDeps == 0 {
+		b.WriteString("None detected\n\n")
+	} else {
+		fmt.Fprintf(&b, "<details><summary>melange (%d)</summary>\n<blockquote>\n\n", totalDeps)
+		sortedReport := append([]renovatePackageFile{}, report...)
+		sort.Slice(sortedReport, func(i, j int) bool { return sortedReport[i].PackageFile < sortedReport[j].PackageFile })
+		for _, pf := range sortedReport {
+			fmt.Fprintf(&b, "<details><summary>%s</summary>\n\n", pf.PackageFile)
+			for _, d := range pf.Deps {
+				version := d.CurrentVersion
+				if version == "" {
+					version = "unknown version"
+				}
+				line := fmt.Sprintf(" - `%s %s`", d.DepName, version)
+				if d.UpdateAvailable && d.ResolvedVersion != "" {
+					line += fmt.Sprintf(" → [Updates: `%s`]", d.ResolvedVersion)
+				}
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
+			b.WriteString("\n</details>\n\n")
+		}
+		b.WriteString("</blockquote>\n</details>\n\n")
+	}
+
+	return b.String()
+}
+
+func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, repo string, report []renovatePackageFile, dryRun bool, autoclose bool) error {
+	log := clog.FromContext(ctx)
+
+	hasErrors := false
+	hasOpenPRs := false
+	for _, pf := range report {
+		for _, d := range pf.Deps {
+			if d.Skipped && d.SkipReason != "" && d.SkipReason != "not due per schedule" {
+				hasErrors = true
+			}
+			if d.PRUrl != "" {
+				hasOpenPRs = true
+			}
+		}
+	}
+
+	issues, _, err := gh.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+		State: "all",
+	})
+	if err != nil {
+		return fmt.Errorf("listing issues: %w", err)
+	}
+	var matching []*github.Issue
+	for _, iss := range issues {
+		if iss.GetTitle() == dashboardTitle {
+			matching = append(matching, iss)
+		}
+	}
+	var existing *github.Issue
+	for _, iss := range matching {
+		if iss.GetState() != "open" {
+			continue
+		}
+		if existing == nil {
+			existing = iss
+			continue
+		}
+		if !dryRun {
+			if _, _, cErr := gh.Issues.Edit(ctx, owner, repo, iss.GetNumber(), &github.IssueRequest{
+				State: github.Ptr("closed"),
+			}); cErr != nil {
+				log.Warn("failed to close duplicate dashboard issue", "number", iss.GetNumber(), "error", cErr)
+			}
+		}
+	}
+	if existing == nil {
+		for _, iss := range matching {
+			if existing == nil || iss.GetNumber() > existing.GetNumber() {
+				existing = iss
+			}
+		}
+	}
+
+	if autoclose && !hasErrors && !hasOpenPRs {
+		if existing == nil || existing.GetState() == "closed" {
+			return nil
+		}
+		if dryRun {
+			log.Info("DRY RUN: would close Dependency Dashboard issue (autoclose enabled)")
+			return nil
+		}
+		_, _, err := gh.Issues.Edit(ctx, owner, repo, existing.GetNumber(), &github.IssueRequest{
+			State: github.Ptr("closed"),
+		})
+		return err
+	}
+
+	if existing == nil && !hasErrors && !hasOpenPRs {
+		return nil
+	}
+
+	body := renderDashboardBody(report)
+
+	if dryRun {
+		log.Info("DRY RUN: would create/update Dependency Dashboard issue", "body_preview", truncateString(body, 200))
+		return nil
+	}
+
+	if existing == nil {
+		_, _, err := gh.Issues.Create(ctx, owner, repo, &github.IssueRequest{
+			Title: github.Ptr(dashboardTitle),
+			Body:  github.Ptr(body),
+		})
+		return err
+	}
+
+	req := &github.IssueRequest{Body: github.Ptr(body)}
+	if existing.GetState() == "closed" {
+		req.State = github.Ptr("open")
+	}
+	_, _, err = gh.Issues.Edit(ctx, owner, repo, existing.GetNumber(), req)
+	return err
+}
+
+func isRebaseRequested(body string) bool {
+	m := prRebaseCheckboxRe.FindStringSubmatch(body)
+	if m == nil {
+		return false
+	}
+	return m[1] == "x"
+}
+
 func main() {
 	logLevelFlag := flag.String("log-level", "info", "Log level")
 	dryRunFlag := flag.Bool("dry-run", false, "Saves PR metadata to a local file if a new PR is to be opened and skips the schedule logic dependant on the S3 backend.")
@@ -1145,9 +1557,27 @@ func main() {
 	var reportMu sync.Mutex
 	var report []renovatePackageFile
 
+	var checks dashboardChecks
+	var ghForDashboard *github.Client
+	var repoOwner, repoName string
+	if !*dryRunFlag {
+		ghForDashboard = github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
+		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
+		if len(repoParts) != 2 {
+			log.Error("invalid GITHUB_REPOSITORY format, expected owner/repo", "value", os.Getenv("GITHUB_REPOSITORY"))
+			os.Exit(1)
+		}
+		repoOwner, repoName = repoParts[0], repoParts[1]
+		_, checks, err = readDashboard(ctx, ghForDashboard, repoOwner, repoName)
+		if err != nil {
+			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
+		}
+	}
+
 	for _, item := range discoveredConfigs {
+		forceRetry := checks.RetryAll || checks.RetryPackage[item.Config.Package.Name]
 		g.Go(func() error {
-			dep, err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts)
+			dep, err := run(ctx, item.Path, item.Config, *dryRunFlag, awsOpts, forceRetry, checks)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -1187,6 +1617,12 @@ func main() {
 		"failed", failureCount.Load(),
 	)
 
+	if !*dryRunFlag {
+		if err := ensureDependencyDashboard(ctx, ghForDashboard, repoOwner, repoName, report, *dryRunFlag, false); err != nil {
+			log.Warn("failed to update dependency dashboard", "error", err)
+		}
+	}
+
 	sort.Slice(report, func(i, j int) bool {
 		return report[i].PackageFile < report[j].PackageFile
 	})
@@ -1200,7 +1636,7 @@ func main() {
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions) (*renovateDep, error) {
+func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, forceRetry bool, checks dashboardChecks) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -1264,7 +1700,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 			return dep, fmt.Errorf("loading package state from S3: %w", err)
 		}
 
-		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
+		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) && !forceRetry {
 			log.Debug("Skipping config: not due per schedule",
 				"schedule", cfg.Update.Schedule,
 				"schedule_reason", cfg.Update.Schedule.Reason,
@@ -1292,6 +1728,10 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		result, err = getLatestGitVersion(ctx, cfg, patterns)
 	case cfg.Update.OCIMonitor != nil:
 		result, err = getLatestOCIVersion(ctx, cfg, patterns)
+	case cfg.Update.VersionDataMonitor != nil:
+		dep.Skipped = true
+		dep.SkipReason = "version-data monitor is not yet implemented"
+		return dep, fmt.Errorf("version-data monitor is not supported")
 	default:
 		dep.Skipped = true
 		dep.SkipReason = "no update monitor configured for package"
@@ -1328,7 +1768,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 	prTitle := fmt.Sprintf("%s/%s package update", cfg.Package.Name, result.Version)
 	prBody := "<p align=\"center\">\n" +
 		"  <img src=\"https://raw.githubusercontent.com/wolfi-dev/.github/b535a42419ce0edb3c144c0edcff55a62b8ec1f8/profile/wolfi-logo-light-mode.svg\" />\n" +
-		"</p>"
+		"</p>" + prRebaseControl
 
 	if err := bumpConfig(ctx, filePath, result.Version, result.CommitSHA); err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
@@ -1357,10 +1797,10 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 	ghClient := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
 
 	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, parts[0], parts[1],
-		filePath, cfg.Package.Name,
-		result,
+		filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
+		checks.RebasePR[prBranch] || checks.RebaseAll,
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
