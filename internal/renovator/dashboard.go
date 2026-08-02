@@ -39,7 +39,6 @@ func parseDashboardBody(body string) dashboardChecks {
 			checks.RebaseAll = true
 		}
 	}
-
 	return checks
 }
 
