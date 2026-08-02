@@ -23,6 +23,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Options contains the runtime and transport inputs required to execute the
+// renovation workflow from the command layer.
 type Options struct {
 	LogLevel     string
 	DryRun       bool
@@ -109,6 +111,7 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 	return found, err
 }
 
+// Run executes the melange-renovator workflow using the typed command options.
 func Run(opts Options) {
 	RunContext(context.Background(), opts)
 }

@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
-	"strings"
 	"unicode"
 
 	"github.com/chainguard-dev/clog"
@@ -24,9 +23,6 @@ var (
 func main() {
 	v := viper.New()
 	v.SetEnvPrefix("RENOVATE")
-	v.AutomaticEnv()
-	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-
 	rootCmd := newRootCommand(v)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
