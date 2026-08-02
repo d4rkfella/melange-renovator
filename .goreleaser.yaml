@@ -53,7 +53,7 @@ changelog:
 snapshot:
   version_template: "{{ incpatch .Version }}-dev.{{ .Timestamp }}"
 
-dockers:
+dockers_v2:
   - ids:
       - melange-build
     images:
