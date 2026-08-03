@@ -199,26 +199,27 @@ func ensurePR(
 	prExists := openPR != nil
 	var prURL string
 
+	repoInfo, _, rErr := gh.Repositories.Get(ctx, owner, repo)
+	defaultBranch := "main"
+	if rErr == nil {
+		defaultBranch = repoInfo.GetDefaultBranch()
+	}
+
 	if prExists {
 		prURL = openPR.GetHTMLURL()
 
-		// 1. Fetch full PR details so openPR.GetMergeable() is populated accurately by GitHub
 		fullPR, _, pErr := gh.PullRequests.Get(ctx, owner, repo, openPR.GetNumber())
 		if pErr == nil {
 			openPR = fullPR
 		}
 
-		repoInfo, _, rErr := gh.Repositories.Get(ctx, owner, repo)
-		if rErr == nil {
-			currentDefault := repoInfo.GetDefaultBranch()
-			if openPR.GetBase().GetRef() != "" && openPR.GetBase().GetRef() != currentDefault && !dryRun {
-				log.Info("PR base branch has drifted, retargeting",
-					"pr", openPR.GetNumber(), "old_base", openPR.GetBase().GetRef(), "new_base", currentDefault)
-				if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
-					Base: &github.PullRequestBranch{Ref: github.Ptr(currentDefault)},
-				}); uErr != nil {
-					log.Warn("failed to retarget PR base branch", "error", uErr)
-				}
+		if openPR.GetBase().GetRef() != "" && openPR.GetBase().GetRef() != defaultBranch && !dryRun {
+			log.Info("PR base branch has drifted, retargeting",
+				"pr", openPR.GetNumber(), "old_base", openPR.GetBase().GetRef(), "new_base", defaultBranch)
+			if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
+				Base: &github.PullRequestBranch{Ref: github.Ptr(defaultBranch)},
+			}); uErr != nil {
+				log.Warn("failed to retarget PR base branch", "error", uErr)
 			}
 		}
 
@@ -240,8 +241,16 @@ func ensurePR(
 
 		remoteContent, _ := remoteFile.GetContent()
 
-		hasConflict := openPR.Mergeable != nil && !*openPR.Mergeable
-		rebaseRequested := forceRebase || isRebaseRequested(openPR.GetBody()) || hasConflict
+		var hasConflict bool
+		if openPR.Mergeable != nil && !*openPR.Mergeable {
+			hasConflict = true
+		}
+		if openPR.GetMergeableState() == "dirty" {
+			hasConflict = true
+		}
+
+		manualRebase := forceRebase || isRebaseRequested(openPR.GetBody())
+		rebaseRequested := manualRebase || hasConflict
 
 		oldFP := fingerprint(remoteContent, openPR.GetTitle())
 		newFP := fingerprint(string(content), prTitle)
@@ -250,9 +259,36 @@ func ensurePR(
 			log.Debug("content and title unchanged, nothing to do")
 			return prURL, nil, nil
 		}
+
 		if rebaseRequested {
-			log.Debug("rebase requested or merge conflict detected, forcing update",
-				"pr", openPR.GetNumber(), "has_conflict", hasConflict)
+			if manualRebase {
+				log.Info("forcing branch rebase: user requested via checkbox or flag", "pr", openPR.GetNumber())
+			} else if hasConflict {
+				log.Info("forcing branch rebase: merge conflict detected with default branch", "pr", openPR.GetNumber())
+			}
+
+			if !dryRun {
+				mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
+				if gErr != nil {
+					return "", nil, fmt.Errorf("getting default branch ref for rebase: %w", gErr)
+				}
+				latestMainSHA := mainRef.GetObject().GetSHA()
+
+				_, _, uErr := gh.Git.UpdateRef(
+					ctx,
+					owner,
+					repo,
+					"refs/heads/"+prBranch,
+					github.UpdateRef{
+						SHA:   latestMainSHA,
+						Force: github.Ptr(true),
+					},
+				)
+				if uErr != nil {
+					return "", nil, fmt.Errorf("force-resetting branch to default branch: %w", uErr)
+				}
+				log.Info("successfully force-reset branch to latest default branch commit", "pr", openPR.GetNumber())
+			}
 		}
 	}
 
@@ -340,12 +376,6 @@ func ensurePR(
 		return "", closedSuperseded, nil
 	}
 
-	repoInfo, _, err := gh.Repositories.Get(ctx, owner, repo)
-	if err != nil {
-		return "", nil, fmt.Errorf("getting repo info: %w", err)
-	}
-	defaultBranch := repoInfo.GetDefaultBranch()
-
 	if _, err := commitFileWithRetry(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
 		if errors.Is(err, errBranchModifiedByHuman) {
 			return prURL, closedSuperseded, nil
@@ -358,10 +388,10 @@ func ensurePR(
 		createErr := withRetry(ctx, 3, func() error {
 			var e error
 			newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-				Title: new(prTitle),
-				Body:  new(prBody),
-				Head:  new(prBranch),
-				Base:  new(defaultBranch),
+				Title: github.Ptr(prTitle),
+				Body:  github.Ptr(prBody),
+				Head:  github.Ptr(prBranch),
+				Base:  github.Ptr(defaultBranch),
 			})
 			return e
 		})
