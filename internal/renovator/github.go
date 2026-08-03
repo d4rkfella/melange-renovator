@@ -164,7 +164,6 @@ func ensurePR(
 			return prURL, nil, nil
 		}
 
-		// Perform Rebase/Force-Reset if needed
 		if rebaseRequested {
 			if manualRebase {
 				log.Info("forcing branch rebase: user requested via checkbox or flag", "pr", openPR.GetNumber())
@@ -175,11 +174,34 @@ func ensurePR(
 			}
 
 			if !dryRun {
+				prRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+prBranch)
+				if gErr != nil {
+					return "", nil, fmt.Errorf("getting pr branch ref for rebase: %w", gErr)
+				}
+				oldPRSHA := prRef.GetObject().GetSHA()
+
 				mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
 				if gErr != nil {
 					return "", nil, fmt.Errorf("getting default branch ref for rebase: %w", gErr)
 				}
 				latestMainSHA := mainRef.GetObject().GetSHA()
+
+				mainCommit, _, gErr := gh.Git.GetCommit(ctx, owner, repo, latestMainSHA)
+				if gErr != nil {
+					return "", nil, fmt.Errorf("getting main commit tree: %w", gErr)
+				}
+
+				newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
+					Message: github.Ptr(fmt.Sprintf("Rebase branch with %s", defaultBranch)),
+					Tree:    mainCommit.Tree,
+					Parents: []*github.Commit{
+						{SHA: github.Ptr(latestMainSHA)},
+						{SHA: github.Ptr(oldPRSHA)},
+					},
+				}, nil)
+				if gErr != nil {
+					return "", nil, fmt.Errorf("creating rebase commit: %w", gErr)
+				}
 
 				_, _, uErr := gh.Git.UpdateRef(
 					ctx,
@@ -187,7 +209,7 @@ func ensurePR(
 					repo,
 					"refs/heads/"+prBranch,
 					github.UpdateRef{
-						SHA:   latestMainSHA,
+						SHA:   newCommit.GetSHA(),
 						Force: github.Ptr(true),
 					},
 				)
@@ -196,7 +218,6 @@ func ensurePR(
 				}
 				log.Info("successfully force-reset branch to latest default branch commit", "pr", openPR.GetNumber())
 
-				// Uncheck checkbox in PR description if checked
 				if prBodyChecked {
 					uncheckedBody := uncheckRebaseBox(openPR.GetBody())
 					if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
