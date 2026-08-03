@@ -22,14 +22,14 @@ func isRefAlreadyExistsErr(err error) bool {
 	return false
 }
 
-func isBranchModifiedByHuman(ctx context.Context, gh *github.Client, owner, repo, defaultBranch, prBranch string) (bool, error) {
+func hasUnmanagedCommitsOnBranch(ctx context.Context, gh *github.Client, owner, repo, defaultBranch, prBranch string) (bool, error) {
 	self, _, err := gh.Users.Get(ctx, "")
 	if err != nil {
 		return false, fmt.Errorf("resolving authenticated identity: %w", err)
 	}
 	selfLogin := self.GetLogin()
 
-	comparison, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, defaultBranch, prBranch, nil)
+	comparison, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, prBranch, defaultBranch, nil)
 	if err != nil {
 		return false, fmt.Errorf("comparing %s...%s: %w", defaultBranch, prBranch, err)
 	}
@@ -122,7 +122,7 @@ func commitFileWithRetry(
 	log := clog.FromContext(ctx)
 
 	if branchExists {
-		modified, mErr := isBranchModifiedByHuman(ctx, gh, owner, repo, defaultBranch, prBranch)
+		modified, mErr := hasUnmanagedCommitsOnBranch(ctx, gh, owner, repo, defaultBranch, prBranch)
 		if mErr != nil {
 			return "", fmt.Errorf("checking branch modification status: %w", mErr)
 		}
