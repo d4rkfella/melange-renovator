@@ -119,7 +119,7 @@ type renovatePackageFile struct {
 }
 
 var anyCheckboxRe = regexp.MustCompile(`- \[( |x)] <!-- ([^>]+?) -->`)
-var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[\sx])] <!-- rebase-check -->`)
+var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[xX])] <!-- rebase-check -->`)
 
 func (d dashboardChecks) ShouldForce(pkgName string) bool {
 	if d.RebaseAll {
