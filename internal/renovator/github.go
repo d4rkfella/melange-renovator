@@ -202,6 +202,12 @@ func ensurePR(
 	if prExists {
 		prURL = openPR.GetHTMLURL()
 
+		// 1. Fetch full PR details so openPR.GetMergeable() is populated accurately by GitHub
+		fullPR, _, pErr := gh.PullRequests.Get(ctx, owner, repo, openPR.GetNumber())
+		if pErr == nil {
+			openPR = fullPR
+		}
+
 		repoInfo, _, rErr := gh.Repositories.Get(ctx, owner, repo)
 		if rErr == nil {
 			currentDefault := repoInfo.GetDefaultBranch()
@@ -233,16 +239,20 @@ func ensurePR(
 		}
 
 		remoteContent, _ := remoteFile.GetContent()
-		rebaseRequested := forceRebase || isRebaseRequested(openPR.GetBody())
+
+		hasConflict := openPR.Mergeable != nil && !*openPR.Mergeable
+		rebaseRequested := forceRebase || isRebaseRequested(openPR.GetBody()) || hasConflict
 
 		oldFP := fingerprint(remoteContent, openPR.GetTitle())
 		newFP := fingerprint(string(content), prTitle)
+
 		if oldFP == newFP && !rebaseRequested {
 			log.Debug("content and title unchanged, nothing to do")
 			return prURL, nil, nil
 		}
 		if rebaseRequested {
-			log.Debug("rebase requested, forcing update despite unchanged content", "pr", openPR.GetNumber())
+			log.Debug("rebase requested or merge conflict detected, forcing update",
+				"pr", openPR.GetNumber(), "has_conflict", hasConflict)
 		}
 	}
 
