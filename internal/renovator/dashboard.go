@@ -3,6 +3,7 @@ package renovator
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +64,22 @@ func prBranchName(pkgName string) string {
 	return "update-" + pkgName
 }
 
+func prNumberFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == "pull" {
+			return parts[i+1]
+		}
+	}
+
+	return ""
+}
+
 func renderDashboardBody(report []renovatePackageFile) string {
 	var errored, openPRs, upToDate []renovateDep
 	for _, pf := range report {
@@ -106,7 +123,11 @@ func renderDashboardBody(report []renovatePackageFile) string {
 		for _, d := range openPRs {
 			branch := prBranchName(d.PackageName)
 			b.WriteString(checkboxLine("rebase-branch="+branch, false))
-			fmt.Fprintf(&b, "[%s/%s package update](%s)\n", d.PackageName, d.ResolvedVersion, d.PRUrl)
+			if prNum := prNumberFromURL(d.PRUrl); prNum != "" {
+				fmt.Fprintf(&b, "[%s/%s package update](../pull/%s)\n", d.PackageName, d.ResolvedVersion, prNum)
+			} else {
+				fmt.Fprintf(&b, "[%s/%s package update](%s)\n", d.PackageName, d.ResolvedVersion, d.PRUrl)
+			}
 		}
 		if len(openPRs) > 1 {
 			b.WriteString(checkboxLine("rebase-all-open-prs", false))
