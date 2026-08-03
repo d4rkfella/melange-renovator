@@ -109,16 +109,10 @@ func ensurePR(
 			return prURL, nil, nil
 		}
 
-		// -------------------------------------------------------------------
-		// RENOVATE DECISION GRAPH
-		// -------------------------------------------------------------------
+		rebaseWhen := "auto"
 
-		rebaseWhen := "auto" // Options: "auto", "behind-base-branch", "conflicted", "never"
-
-		// 1. Check for Conflicts
 		hasConflict := isBranchConflicted(openPR)
 
-		// 2. Check for Staleness (Behind Base Branch)
 		stale, sErr := isBranchStale(ctx, gh, owner, repo, defaultBranch, prBranch)
 		if sErr != nil {
 			log.Warn("could not determine staleness", "error", sErr)
@@ -154,11 +148,9 @@ func ensurePR(
 
 		remoteContent, _ := remoteFile.GetContent()
 
-		// Compare fingerprints
 		oldFP := fingerprint(remoteContent, openPR.GetTitle())
 		newFP := fingerprint(string(content), prTitle)
 
-		// Short-circuit: If content/title unchanged AND no rebase required, abort early
 		if oldFP == newFP && !rebaseRequested {
 			log.Debug("content and title unchanged and branch up to date, nothing to do")
 			return prURL, nil, nil
@@ -174,12 +166,6 @@ func ensurePR(
 			}
 
 			if !dryRun {
-				prRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+prBranch)
-				if gErr != nil {
-					return "", nil, fmt.Errorf("getting pr branch ref for rebase: %w", gErr)
-				}
-				oldPRSHA := prRef.GetObject().GetSHA()
-
 				mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
 				if gErr != nil {
 					return "", nil, fmt.Errorf("getting default branch ref for rebase: %w", gErr)
@@ -191,13 +177,30 @@ func ensurePR(
 					return "", nil, fmt.Errorf("getting main commit tree: %w", gErr)
 				}
 
-				newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
-					Message: github.Ptr(fmt.Sprintf("Rebase branch with %s", defaultBranch)),
-					Tree:    mainCommit.Tree,
-					Parents: []*github.Commit{
-						{SHA: github.Ptr(latestMainSHA)},
-						{SHA: github.Ptr(oldPRSHA)},
+				blob, _, gErr := gh.Git.CreateBlob(ctx, owner, repo, github.Blob{
+					Content:  github.Ptr(string(content)),
+					Encoding: github.Ptr("utf-8"),
+				})
+				if gErr != nil {
+					return "", nil, fmt.Errorf("creating blob for rebase: %w", gErr)
+				}
+
+				newTree, _, gErr := gh.Git.CreateTree(ctx, owner, repo, mainCommit.Tree.GetSHA(), []*github.TreeEntry{
+					{
+						Path: github.Ptr(fileAPIPath),
+						Mode: github.Ptr("100644"),
+						Type: github.Ptr("blob"),
+						SHA:  blob.SHA,
 					},
+				})
+				if gErr != nil {
+					return "", nil, fmt.Errorf("creating tree for rebase: %w", gErr)
+				}
+
+				newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
+					Message: github.Ptr(prTitle),
+					Tree:    newTree,
+					Parents: []*github.Commit{{SHA: github.Ptr(latestMainSHA)}},
 				}, nil)
 				if gErr != nil {
 					return "", nil, fmt.Errorf("creating rebase commit: %w", gErr)
@@ -214,9 +217,9 @@ func ensurePR(
 					},
 				)
 				if uErr != nil {
-					return "", nil, fmt.Errorf("force-resetting branch to default branch: %w", uErr)
+					return "", nil, fmt.Errorf("force-pushing branch rebase: %w", uErr)
 				}
-				log.Info("successfully force-reset branch to latest default branch commit", "pr", openPR.GetNumber())
+				log.Info("successfully force-pushed branch to clean rebase commit", "pr", openPR.GetNumber())
 
 				if prBodyChecked {
 					uncheckedBody := uncheckRebaseBox(openPR.GetBody())
