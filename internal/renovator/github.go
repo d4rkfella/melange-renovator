@@ -130,6 +130,17 @@ func ensurePR(
 		staleRequiresRebase := stale && (rebaseWhen == "behind-base-branch")
 		rebaseRequested := manualRebase || hasConflict || staleRequiresRebase
 
+		log.Debug("rebase evaluation flags",
+			"pr", openPR.GetNumber(),
+			"rebase_requested", rebaseRequested,
+			"manual_rebase", manualRebase,
+			"force_rebase", forceRebase,
+			"pr_body_checked", prBodyChecked,
+			"has_conflict", hasConflict,
+			"stale", stale,
+			"stale_requires_rebase", staleRequiresRebase,
+		)
+
 		var remoteFile *github.RepositoryContent
 		err = withRetry(ctx, 3, func() error {
 			var e error
