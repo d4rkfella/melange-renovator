@@ -29,20 +29,34 @@ func hasUnmanagedCommitsOnBranch(ctx context.Context, gh *github.Client, owner, 
 	}
 	selfLogin := self.GetLogin()
 
-	comparison, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, prBranch, defaultBranch, nil)
+	comparison, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, defaultBranch, prBranch, nil)
 	if err != nil {
 		return false, fmt.Errorf("comparing %s...%s: %w", defaultBranch, prBranch, err)
 	}
 
 	for _, c := range comparison.Commits {
-		if login := c.GetAuthor().GetLogin(); login != "" && login != selfLogin {
-			return true, nil
-		}
-		if login := c.GetCommitter().GetLogin(); login != "" && login != selfLogin {
-			return true, nil
+		author := c.GetAuthor().GetLogin()
+		committer := c.GetCommitter().GetLogin()
+
+		if (author != "" && author != selfLogin) || (committer != "" && committer != selfLogin) {
+			isBaseCommit, err := isCommitOnBranch(ctx, gh, owner, repo, defaultBranch, c.GetSHA())
+			if err != nil {
+				return false, err
+			}
+			if !isBaseCommit {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+func isCommitOnBranch(ctx context.Context, gh *github.Client, owner, repo, branch, sha string) (bool, error) {
+	comp, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, sha, branch, nil)
+	if err != nil {
+		return false, nil
+	}
+	return comp.GetBehindBy() >= 0 && comp.GetAheadBy() == 0, nil
 }
 
 func commitFileOnBranch(
