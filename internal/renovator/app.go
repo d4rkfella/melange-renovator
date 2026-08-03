@@ -23,8 +23,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Options contains the runtime and transport inputs required to execute the
-// renovation workflow from the command layer.
 type Options struct {
 	LogLevel     string
 	DryRun       bool
@@ -191,9 +189,8 @@ func RunContext(ctx context.Context, opts Options) {
 	}
 
 	for _, item := range discoveredConfigs {
-		forceRetry := checks.RetryAll || checks.RetryPackage[item.Config.Package.Name]
 		g.Go(func() error {
-			dep, err := run(ctx, item.Path, item.Config, opts.DryRun, awsOpts, forceRetry, checks)
+			dep, err := run(ctx, item.Path, item.Config, opts.DryRun, awsOpts, checks)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -252,13 +249,15 @@ func RunContext(ctx context.Context, opts Options) {
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, forceRetry bool, checks dashboardChecks) (*renovateDep, error) {
+func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
 		"config_path", filePath,
 	))
 	log := clog.FromContext(ctx)
+
+	forceRebase := checks.ShouldForce(cfg.Package.Name)
 
 	dep := &renovateDep{
 		DepName:        cfg.Package.Name,
@@ -316,7 +315,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 			return dep, fmt.Errorf("loading package state from S3: %w", err)
 		}
 
-		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) && !forceRetry {
+		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) && !forceRebase {
 			log.Debug("Skipping config: not due per schedule",
 				"schedule", cfg.Update.Schedule,
 				"schedule_reason", cfg.Update.Schedule.Reason,
@@ -416,7 +415,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
-		checks.RebasePR[prBranch] || checks.RebaseAll,
+		forceRebase,
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())

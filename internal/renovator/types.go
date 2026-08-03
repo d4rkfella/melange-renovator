@@ -26,10 +26,8 @@ type discoveredConfig struct {
 }
 
 type dashboardChecks struct {
-	RetryPackage map[string]bool
-	RebasePR     map[string]bool
-	RetryAll     bool
-	RebaseAll    bool
+	RebasePR  map[string]bool
+	RebaseAll bool
 }
 
 type awsOptions struct {
@@ -122,3 +120,10 @@ type renovatePackageFile struct {
 
 var anyCheckboxRe = regexp.MustCompile(`- \[( |x)] <!-- ([^>]+?) -->`)
 var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[\sx])] <!-- rebase-check -->`)
+
+func (d dashboardChecks) ShouldForce(pkgName string) bool {
+	if d.RebaseAll {
+		return true
+	}
+	return d.RebasePR[pkgName]
+}

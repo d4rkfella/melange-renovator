@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,21 +28,18 @@ func checkboxLine(marker string, checked bool) string {
 
 func parseDashboardBody(body string) dashboardChecks {
 	checks := dashboardChecks{
-		RetryPackage: map[string]bool{},
-		RebasePR:     map[string]bool{},
+		RebasePR: make(map[string]bool),
 	}
+
 	for marker := range allCheckedMarkers(body) {
 		switch {
-		case strings.HasPrefix(marker, "retry-package="):
-			checks.RetryPackage[strings.TrimPrefix(marker, "retry-package=")] = true
 		case strings.HasPrefix(marker, "rebase-branch="):
 			checks.RebasePR[strings.TrimPrefix(marker, "rebase-branch=")] = true
-		case marker == "retry-all-errored-prs":
-			checks.RetryAll = true
 		case marker == "rebase-all-open-prs":
 			checks.RebaseAll = true
 		}
 	}
+
 	return checks
 }
 
@@ -291,17 +289,18 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 }
 
 func isRebaseRequested(body string) bool {
-	m := prRebaseCheckboxRe.FindStringSubmatch(body)
-	if m == nil {
-		return false
-	}
-	return m[1] == "x"
+	return prRebaseCheckboxRe.MatchString(body)
+}
+
+func uncheckRebaseBox(body string) string {
+	re := regexp.MustCompile(`(?i)- \[[xX]\](\s*.*(rebase|retry))`)
+	return re.ReplaceAllString(body, "- [ ]$1")
 }
 
 func allCheckedMarkers(body string) map[string]bool {
 	out := map[string]bool{}
 	for _, m := range anyCheckboxRe.FindAllStringSubmatch(body, -1) {
-		if m[1] == "x" {
+		if m[1] == "x" || m[1] == "X" {
 			out[m[2]] = true
 		}
 	}
