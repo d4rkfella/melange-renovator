@@ -87,6 +87,9 @@ func ensurePR(
 		defaultBranch = repoInfo.GetDefaultBranch()
 	}
 
+	// Tracks whether the rebase path already committed+pushed the desired
+	// content, so we don't fall through into a second, redundant commit
+	// (and don't re-run isBranchModified against a commit we just made).
 	rebaseCommitted := false
 
 	if prExists {
@@ -107,10 +110,14 @@ func ensurePR(
 			}
 		}
 
-		if sequential {
-			log.Debug("Sequential mode: open PR already exists, skipping")
-			return prURL, nil, nil
-		}
+		// NOTE: "sequential" (require-sequential) only means "don't
+		// supersede/close an older unmerged PR to jump ahead to a newer
+		// version" — it does not mean "stop maintaining the currently
+		// open PR." So there is no early-return here. Retargeting,
+		// staleness/conflict checks, rebasing, and content updates all
+		// still apply normally regardless of sequential. The only place
+		// sequential actually changes behavior is the supersede-and-close
+		// loop further below, which is already gated on !sequential.
 
 		hasConflict := isBranchConflicted(openPR)
 
@@ -139,6 +146,9 @@ func ensurePR(
 			}
 		}
 
+		// Computed once here so both shouldRebase and the human-edit guard
+		// below use the exact same notion of "an explicit manual rebase
+		// was requested" (dashboard checkbox / label / PR body checkbox).
 		manualRebase := dashboardChecks.RebaseAll ||
 			dashboardChecks.RebasePR[prBranch] ||
 			isRebaseRequested(openPR.GetBody())
@@ -151,6 +161,11 @@ func ensurePR(
 			requireUpToDate,
 		)
 
+		// Mirrors upstream Renovate: automatic rebase triggers (stale,
+		// conflicted, auto) never touch a branch that has commits from
+		// someone other than this tool. Only an explicit manual rebase
+		// request overrides this and force-recreates the branch, which
+		// discards those edits.
 		if rebaseNeeded && !manualRebase {
 			modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
 			if mErr != nil {
