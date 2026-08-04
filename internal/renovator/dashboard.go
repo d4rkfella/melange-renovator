@@ -117,7 +117,7 @@ func renderDashboardBody(report []renovatePackageFile) string {
 
 	if len(openPRs) > 0 {
 		b.WriteString("## Open\n\n")
-		b.WriteString("The following updates have all been created. To force a retry/rebase of any, check a box below.\n\n")
+		b.WriteString("The following updates have all been created. To force a retry/rebase of any, click on a checkbox below.\n\n")
 		for _, d := range openPRs {
 			branch := prBranchName(d.PackageName)
 			b.WriteString(checkboxLine("rebase-branch="+branch, false))

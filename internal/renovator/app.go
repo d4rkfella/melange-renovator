@@ -32,6 +32,7 @@ type Options struct {
 	AWSAccessKey string
 	AWSSecretKey string
 	AWSEndpoint  string
+	Token        string
 }
 
 func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
@@ -108,22 +109,16 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 	return found, err
 }
 
-// Run executes the melange-renovator workflow using the typed command options.
 func Run(opts Options) {
 	RunContext(context.Background(), opts)
 }
 
-// RunContext executes the melange-renovator workflow using the provided context.
 func RunContext(ctx context.Context, opts Options) {
 	log := clog.FromContext(ctx)
 
 	if !opts.DryRun {
 		if opts.S3Bucket == "" {
 			log.Error("S3 bucket is required in non-dry-run mode", "hint", "set -s3-bucket or use -dry-run")
-			os.Exit(1)
-		}
-		if os.Getenv("GITHUB_TOKEN") == "" {
-			log.Error("GITHUB_TOKEN is required in non-dry-run mode", "hint", "set GITHUB_TOKEN or use -dry-run")
 			os.Exit(1)
 		}
 		if os.Getenv("GITHUB_REPOSITORY") == "" {
@@ -175,7 +170,7 @@ func RunContext(ctx context.Context, opts Options) {
 	var ghForDashboard *github.Client
 	var repoOwner, repoName string
 	if !opts.DryRun {
-		ghForDashboard = github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
+		ghForDashboard = github.NewClient(nil).WithAuthToken(opts.Token)
 		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
 		if len(repoParts) != 2 {
 			log.Error("invalid GITHUB_REPOSITORY format, expected owner/repo", "value", os.Getenv("GITHUB_REPOSITORY"))

@@ -187,9 +187,9 @@ func ensurePR(
 
 				newTree, _, gErr := gh.Git.CreateTree(ctx, owner, repo, mainCommit.Tree.GetSHA(), []*github.TreeEntry{
 					{
-						Path: github.Ptr(fileAPIPath),
-						Mode: github.Ptr("100644"),
-						Type: github.Ptr("blob"),
+						Path: new(fileAPIPath),
+						Mode: new("100644"),
+						Type: new("blob"),
 						SHA:  blob.SHA,
 					},
 				})
@@ -198,7 +198,7 @@ func ensurePR(
 				}
 
 				newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
-					Message: github.Ptr(prTitle),
+					Message: new(prTitle),
 					Tree:    newTree,
 					Parents: []*github.Commit{{SHA: github.Ptr(latestMainSHA)}},
 				}, nil)
@@ -213,7 +213,7 @@ func ensurePR(
 					"refs/heads/"+prBranch,
 					github.UpdateRef{
 						SHA:   newCommit.GetSHA(),
-						Force: github.Ptr(true),
+						Force: new(true),
 					},
 				)
 				if uErr != nil {
@@ -329,10 +329,10 @@ func ensurePR(
 		createErr := withRetry(ctx, 3, func() error {
 			var e error
 			newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-				Title: github.Ptr(prTitle),
-				Body:  github.Ptr(prBody),
-				Head:  github.Ptr(prBranch),
-				Base:  github.Ptr(defaultBranch),
+				Title: new(prTitle),
+				Body:  new(prBody),
+				Head:  new(prBranch),
+				Base:  new(defaultBranch),
 			})
 			return e
 		})
@@ -430,10 +430,10 @@ func commitFileOnBranch(
 
 	newTree, _, err := gh.Git.CreateTree(ctx, owner, repo, baseTreeSHA, []*github.TreeEntry{
 		{
-			Path:    github.Ptr(relPath),
-			Mode:    github.Ptr("100644"),
-			Type:    github.Ptr("blob"),
-			Content: github.Ptr(string(content)),
+			Path:    new(relPath),
+			Mode:    new("100644"),
+			Type:    new("blob"),
+			Content: new(string(content)),
 		},
 	})
 	if err != nil {
@@ -441,9 +441,9 @@ func commitFileOnBranch(
 	}
 
 	newCommit, _, err := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
-		Message: github.Ptr(commitMessage),
+		Message: new(commitMessage),
 		Tree:    &github.Tree{SHA: newTree.SHA},
-		Parents: []*github.Commit{{SHA: github.Ptr(parentSHA)}},
+		Parents: []*github.Commit{{SHA: new(parentSHA)}},
 	}, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating commit: %w", err)
@@ -470,7 +470,7 @@ func updateBranchRef(ctx context.Context, gh *github.Client, owner, repo, branch
 
 	_, _, err := gh.Git.UpdateRef(ctx, owner, repo, "refs/heads/"+branch, github.UpdateRef{
 		SHA:   newSHA,
-		Force: github.Ptr(true),
+		Force: new(true),
 	})
 	if err != nil {
 		return fmt.Errorf("updating branch %s: %w", branch, err)

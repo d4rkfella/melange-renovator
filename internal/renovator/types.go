@@ -13,7 +13,7 @@ const reopenThreshold = 7 * 24 * time.Hour
 
 const dashboardTitle = "Renovate Dashboard"
 
-const prRebaseControl = "\n\n---\n\n - [ ] <!-- rebase-check -->If you want to force a re-push of this PR (e.g. to retrigger CI), check this box\n"
+const prRebaseControl = "\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n"
 
 type packageState struct {
 	LastVersion string    `json:"last_version"`
