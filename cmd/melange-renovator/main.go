@@ -80,17 +80,11 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 	rootCmd.Flags().String("aws-secret-key", "", "AWS secret access key")
 	rootCmd.Flags().String("aws-endpoint", "", "Custom S3 endpoint URL")
 	rootCmd.Flags().String("token", "", "GitHub token for API access")
+	rootCmd.Flags().String("rebase-when", "auto", "Rebase strategy for PRs (options: 'auto', 'behind-base-branch', 'conflicted', 'never')")
 
-	for _, key := range []string{"log-level", "dry-run", "concurrency", "s3-bucket", "aws-region", "aws-access-key", "aws-secret-key", "aws-endpoint"} {
-		if err := v.BindPFlag(key, rootCmd.Flags().Lookup(key)); err != nil {
-			panic(err)
-		}
+	if err := v.BindPFlags(rootCmd.Flags()); err != nil {
+		panic(err)
 	}
-
-	v.SetDefault("log-level", "info")
-	v.SetDefault("dry-run", false)
-	v.SetDefault("concurrency", 10)
-	v.SetDefault("aws-region", "us-east-1")
 
 	return rootCmd
 }
@@ -107,13 +101,6 @@ func validateAndGetToken(v *viper.Viper) error {
 	token := v.GetString("token")
 
 	if token == "" {
-		token = os.Getenv("RENOVATE_TOKEN")
-		if token != "" {
-			v.Set("token", token)
-		}
-	}
-
-	if token == "" {
 		return TokenValidationError{
 			Message: "'token' MUST be passed using the --token flag or the 'RENOVATE_TOKEN' environment variable",
 		}
@@ -124,6 +111,7 @@ func validateAndGetToken(v *viper.Viper) error {
 			Message: "Token MUST NOT contain whitespace",
 		}
 	}
+
 	return nil
 }
 
@@ -147,5 +135,6 @@ func newOptionsFromViper(v *viper.Viper) renovator.Options {
 		AWSSecretKey: v.GetString("aws-secret-key"),
 		AWSEndpoint:  v.GetString("aws-endpoint"),
 		Token:        v.GetString("token"),
+		RebaseWhen:   v.GetString("rebase-when"),
 	}
 }

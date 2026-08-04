@@ -35,6 +35,7 @@ type Options struct {
 	AWSSecretKey string
 	AWSEndpoint  string
 	Token        string
+	RebaseWhen   string
 }
 
 func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
@@ -111,24 +112,9 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 	return found, err
 }
 
-// Run executes the melange-renovator workflow using the typed command options.
-func Run(opts Options) {
-	RunContext(context.Background(), opts)
-}
-
+// RunContext executes the melange-renovator workflow using the typed command options.
 func RunContext(ctx context.Context, opts Options) {
 	log := clog.FromContext(ctx)
-
-	if !opts.DryRun {
-		if opts.S3Bucket == "" {
-			log.Error("S3 bucket is required in non-dry-run mode", "hint", "set -s3-bucket or use -dry-run")
-			os.Exit(1)
-		}
-		if os.Getenv("GITHUB_REPOSITORY") == "" {
-			log.Error("GITHUB_REPOSITORY is required in non-dry-run mode", "hint", "set GITHUB_REPOSITORY or use -dry-run")
-			os.Exit(1)
-		}
-	}
 
 	discoveredConfigs, err := discoverConfigs(ctx)
 	if err != nil {
@@ -168,19 +154,21 @@ func RunContext(ctx context.Context, opts Options) {
 	var reportMu sync.Mutex
 	var report []renovatePackageFile
 
-	var checks dashboardChecks
 	var dashboardStartBody string
-	var ghForDashboard *github.Client
+	var ghClient *github.Client
 	var repoOwner, repoName string
+	var checks dashboardChecks
+
+	ghClient = github.NewClient(nil).WithAuthToken(opts.Token)
+
 	if !opts.DryRun {
-		ghForDashboard = github.NewClient(nil).WithAuthToken(opts.Token)
 		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
 		if len(repoParts) != 2 {
 			log.Error("invalid GITHUB_REPOSITORY format, expected owner/repo", "value", os.Getenv("GITHUB_REPOSITORY"))
 			os.Exit(1)
 		}
 		repoOwner, repoName = repoParts[0], repoParts[1]
-		_, dashboardStartBody, checks, err = readDashboard(baseCtx, ghForDashboard, repoOwner, repoName)
+		_, dashboardStartBody, checks, err = readDashboard(baseCtx, ghClient, repoOwner, repoName)
 		if err != nil {
 			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
 		}
@@ -188,7 +176,7 @@ func RunContext(ctx context.Context, opts Options) {
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(ctx, item.Path, item.Config, opts.DryRun, awsOpts, checks)
+			dep, err := run(ctx, ghClient, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -229,7 +217,7 @@ func RunContext(ctx context.Context, opts Options) {
 	)
 
 	if !opts.DryRun {
-		if err := ensureDependencyDashboard(baseCtx, ghForDashboard, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
+		if err := ensureDependencyDashboard(baseCtx, ghClient, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
 			log.Warn("failed to update dependency dashboard", "error", err)
 		}
 	}
@@ -247,15 +235,13 @@ func RunContext(ctx context.Context, opts Options) {
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks) (*renovateDep, error) {
+func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
 		"config_path", filePath,
 	))
 	log := clog.FromContext(ctx)
-
-	forceRebase := checks.ShouldForce(cfg.Package.Name)
 
 	dep := &renovateDep{
 		DepName:        cfg.Package.Name,
@@ -313,7 +299,7 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 			return dep, fmt.Errorf("loading package state from S3: %w", err)
 		}
 
-		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) && !forceRebase {
+		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
 			log.Debug("Skipping config: not due per schedule",
 				"schedule", cfg.Update.Schedule,
 				"schedule_reason", cfg.Update.Schedule.Reason,
@@ -326,15 +312,10 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		}
 	}
 
-	if cfg.Update.GitHubMonitor != nil && os.Getenv("GITHUB_TOKEN") == "" {
-		dep.Warnings = append(dep.Warnings,
-			"GITHUB_TOKEN is not set; GitHub API calls for this package will use the unauthenticated rate limit (60 req/hr)")
-	}
-
 	var result versionResult
 	switch {
 	case cfg.Update.GitHubMonitor != nil:
-		result, err = getLatestGitHubVersion(ctx, cfg, patterns)
+		result, err = getLatestGitHubVersion(ctx, ghClient, cfg, patterns)
 	case cfg.Update.ReleaseMonitor != nil:
 		result, err = getLatestReleaseMonitorVersion(ctx, cfg, patterns)
 	case cfg.Update.GitMonitor != nil:
@@ -407,13 +388,11 @@ func run(ctx context.Context, filePath string, cfg *config.Configuration, dryRun
 		return dep, fmt.Errorf("invalid GITHUB_REPOSITORY format %q: expected owner/repo", repoEnv)
 	}
 
-	ghClient := github.NewClient(nil).WithAuthToken(os.Getenv("GITHUB_TOKEN"))
-
 	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, parts[0], parts[1],
 		filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
-		forceRebase,
+		checks, rebaseWhen,
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())

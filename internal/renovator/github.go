@@ -27,7 +27,8 @@ func ensurePR(
 	prBranch, prTitle, prBody string,
 	sequential bool,
 	dryRun bool,
-	forceRebase bool,
+	dashboardChecks dashboardChecks,
+	rebaseWhen string,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 	var closedSuperseded []int
@@ -109,8 +110,6 @@ func ensurePR(
 			return prURL, nil, nil
 		}
 
-		rebaseWhen := "auto"
-
 		hasConflict := isBranchConflicted(openPR)
 
 		stale, sErr := isBranchStale(ctx, gh, owner, repo, defaultBranch, prBranch)
@@ -118,21 +117,34 @@ func ensurePR(
 			log.Warn("could not determine staleness", "error", sErr)
 		}
 
-		prBodyChecked := isRebaseRequested(openPR.GetBody())
-		manualRebase := forceRebase || prBodyChecked
+		requireUpToDate := false
 
-		staleRequiresRebase := stale && (rebaseWhen == "behind-base-branch")
-		rebaseRequested := manualRebase || hasConflict || staleRequiresRebase
+		if rebaseWhen == "auto" {
+			requireUpToDate, err = requiresUpToDateBranch(
+				ctx,
+				gh,
+				owner,
+				repo,
+				defaultBranch,
+			)
 
-		log.Debug("rebase evaluation flags",
-			"pr", openPR.GetNumber(),
-			"rebase_requested", rebaseRequested,
-			"manual_rebase", manualRebase,
-			"force_rebase", forceRebase,
-			"pr_body_checked", prBodyChecked,
-			"has_conflict", hasConflict,
-			"stale", stale,
-			"stale_requires_rebase", staleRequiresRebase,
+			if err != nil {
+				log.Warn(
+					"could not determine branch protection requirements",
+					"error",
+					err,
+				)
+			}
+		}
+
+		rebaseNeeded := shouldRebase(
+			dashboardChecks,
+			openPR,
+			prBranch,
+			rebaseWhen,
+			hasConflict,
+			stale,
+			requireUpToDate,
 		)
 
 		var remoteFile *github.RepositoryContent
@@ -151,20 +163,12 @@ func ensurePR(
 		oldFP := fingerprint(remoteContent, openPR.GetTitle())
 		newFP := fingerprint(string(content), prTitle)
 
-		if oldFP == newFP && !rebaseRequested {
+		if oldFP == newFP && !rebaseNeeded {
 			log.Debug("content and title unchanged and branch up to date, nothing to do")
 			return prURL, nil, nil
 		}
 
-		if rebaseRequested {
-			if manualRebase {
-				log.Info("forcing branch rebase: user requested via checkbox or flag", "pr", openPR.GetNumber())
-			} else if hasConflict {
-				log.Info("forcing branch rebase: merge conflict detected with default branch", "pr", openPR.GetNumber())
-			} else if staleRequiresRebase {
-				log.Info("forcing branch rebase: branch is stale / behind default branch", "pr", openPR.GetNumber())
-			}
-
+		if rebaseNeeded {
 			if !dryRun {
 				mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
 				if gErr != nil {
@@ -221,8 +225,8 @@ func ensurePR(
 				}
 				log.Info("successfully force-pushed branch to clean rebase commit", "pr", openPR.GetNumber())
 
-				if prBodyChecked {
-					uncheckedBody := uncheckRebaseBox(openPR.GetBody())
+				uncheckedBody := uncheckRebaseBox(openPR.GetBody())
+				if uncheckedBody != openPR.GetBody() {
 					if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
 						Body: github.Ptr(uncheckedBody),
 					}); uErr != nil {
@@ -664,4 +668,70 @@ func fingerprint(parts ...string) string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func requiresUpToDateBranch(
+	ctx context.Context,
+	gh *github.Client,
+	owner string,
+	repo string,
+	branch string,
+) (bool, error) {
+	protection, _, err := gh.Repositories.GetBranchProtection(
+		ctx,
+		owner,
+		repo,
+		branch,
+	)
+	if err != nil {
+		if _, ok := err.(*github.ErrorResponse); ok {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return protection.RequiredStatusChecks != nil &&
+			protection.RequiredStatusChecks.Strict,
+		nil
+}
+
+func shouldRebase(
+	dashboardChecks dashboardChecks,
+	pr *github.PullRequest,
+	prBranch string,
+	rebaseWhen string,
+	hasConflict bool,
+	stale bool,
+	requireUpToDate bool,
+) bool {
+	manualRebase :=
+		dashboardChecks.RebaseAll ||
+			dashboardChecks.RebasePR[prBranch] ||
+			isRebaseRequested(pr.GetBody())
+
+	if manualRebase {
+		return true
+	}
+
+	switch rebaseWhen {
+	case "never":
+		return false
+
+	case "conflicted":
+		return hasConflict
+
+	case "behind-base-branch":
+		return stale
+
+	case "auto":
+		if requireUpToDate {
+			return stale
+		}
+
+		return hasConflict
+
+	default:
+		return false
+	}
 }

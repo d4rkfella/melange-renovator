@@ -114,18 +114,13 @@ func resolveLatestVersion(
 	return best, stats, nil
 }
 
-func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
+func getLatestGitHubVersion(ctx context.Context, ghClient *github.Client, cfg *config.Configuration, patterns compiledPatterns) (versionResult, error) {
 	gh := cfg.Update.GitHubMonitor
 	parts := strings.Split(gh.Identifier, "/")
 	if len(parts) != 2 {
 		return versionResult{}, fmt.Errorf("invalid GitHub identifier: %s", gh.Identifier)
 	}
 	owner, repo := parts[0], parts[1]
-
-	client := github.NewClient(nil)
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		client = client.WithAuthToken(token)
-	}
 
 	opts := &github.ListOptions{PerPage: 100}
 
@@ -137,7 +132,7 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 		var allTags []tagEntry
 
 		for {
-			tags, resp, err := client.Repositories.ListTags(ctx, owner, repo, opts)
+			tags, resp, err := ghClient.Repositories.ListTags(ctx, owner, repo, opts)
 			if err != nil {
 				return versionResult{}, fmt.Errorf("listing tags: %w", err)
 			}
@@ -181,7 +176,7 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 	var allTagNames []string
 
 	for {
-		releases, resp, err := client.Repositories.ListReleases(ctx, owner, repo, opts)
+		releases, resp, err := ghClient.Repositories.ListReleases(ctx, owner, repo, opts)
 		if err != nil {
 			return versionResult{}, fmt.Errorf("listing releases: %w", err)
 		}
@@ -206,7 +201,7 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 		return versionResult{}, fmt.Errorf("no valid versions found for %s/%s: %w", owner, repo, err)
 	}
 
-	ref, _, err := client.Git.GetRef(ctx, owner, repo, "refs/tags/"+best.Upstream)
+	ref, _, err := ghClient.Git.GetRef(ctx, owner, repo, "refs/tags/"+best.Upstream)
 	if err != nil {
 		return versionResult{}, fmt.Errorf("fetching ref for tag %s: %w", best.Upstream, err)
 	}
@@ -216,7 +211,7 @@ func getLatestGitHubVersion(ctx context.Context, cfg *config.Configuration, patt
 
 	sha := ref.Object.GetSHA()
 	if ref.Object.GetType() == "tag" {
-		tagObj, _, err := client.Git.GetTag(ctx, owner, repo, sha)
+		tagObj, _, err := ghClient.Git.GetTag(ctx, owner, repo, sha)
 		if err != nil {
 			return versionResult{}, fmt.Errorf("resolving annotated tag %s: %w", best.Upstream, err)
 		}
