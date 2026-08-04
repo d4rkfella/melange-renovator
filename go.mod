@@ -3,8 +3,8 @@ module github.com/d4rkfella/melange-renovator
 go 1.26.5
 
 require (
-	chainguard.dev/apko v1.2.30
-	chainguard.dev/melange v0.56.4
+	chainguard.dev/apko v1.2.31
+	chainguard.dev/melange v0.56.5
 	github.com/aws/aws-sdk-go-v2 v1.43.3
 	github.com/aws/aws-sdk-go-v2/config v1.32.34
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.33
@@ -118,8 +118,7 @@ require (
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
-	go.step.sm/crypto v0.85.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.step.sm/crypto v0.86.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect

@@ -1,9 +1,9 @@
-chainguard.dev/apko v1.2.30 h1:utobhCMRkOhf0eelBQ5e99YSqiv1XM3o5UoR8fxeBEk=
-chainguard.dev/apko v1.2.30/go.mod h1:dqeDWmSrSsSXIUkTVbY62BdYCC9Gk6bJq9uyHpQJM8M=
+chainguard.dev/apko v1.2.31 h1:CqtX2A+EOySioCr5y+QvWIVxa++MhLnctfU6DnXEJx8=
+chainguard.dev/apko v1.2.31/go.mod h1:f54ZMrLLF2crumDOmkIA4MVPpgcLvB5oZopx6MhlizI=
 chainguard.dev/go-grpc-kit v0.17.17 h1:Jwhc0zyUwQbC2hNcsi+YMeUX/JUnM+dXVCkTw6wtPzs=
 chainguard.dev/go-grpc-kit v0.17.17/go.mod h1:qn0meP6RtrbLicE1bgBZnnVU9dvX95eLs0x0T6kZ+b4=
-chainguard.dev/melange v0.56.4 h1:uR7lHkRI1nMugJuCgLPyFJuJMFffPc3mw/M/+Ide0DU=
-chainguard.dev/melange v0.56.4/go.mod h1:ljivY0UrwBt96fAH0f8QhKTUrtLCDwvbHBHl0WL745g=
+chainguard.dev/melange v0.56.5 h1:CfgFmOE34kV539eJ3N7uRzYuSngkZZU9uQ/0XoS2uyo=
+chainguard.dev/melange v0.56.5/go.mod h1:9U8TBpknfNp4JNFr+mDaIc/i3kNIswGMxOmSQX1qP1g=
 chainguard.dev/sdk v0.1.158 h1:aOWATQ4zxYKQ8D+CCUj+hOU18wNQkbHw6tmj+/+GDAk=
 chainguard.dev/sdk v0.1.158/go.mod h1:WIaM60bR6qU84RvE45u4QkOh+BN2uc1nfHuZYLnRfvU=
 cloud.google.com/go/auth v0.21.0 h1:g/QwYfYb2Ai6HH8oomAOyBaIHLbscZ4+T/F/f5JZHkE=
@@ -295,8 +295,8 @@ go.opentelemetry.io/otel/sdk/metric v1.44.0 h1:3LlKgI+VjbVsjNRFZJZAJ30WjXC5VkNRk
 go.opentelemetry.io/otel/sdk/metric v1.44.0/go.mod h1:5B5pMARnXxKhltooO4xUuCBorl65a4EpnTalObqOigA=
 go.opentelemetry.io/otel/trace v1.44.0 h1:jxF5CsGYCe74MCRx2X4g7WsY/VBKRqqpNvXlX/6gtIk=
 go.opentelemetry.io/otel/trace v1.44.0/go.mod h1:oLl1jrMQAVo6v3GAggN+1VH9VIz9iUSvW53sW1Q8PIE=
-go.step.sm/crypto v0.85.0 h1:h3U9gzCcxP1fWbseqy+CwsTxzHFNuoblefy7YP4jBHk=
-go.step.sm/crypto v0.85.0/go.mod h1:Rp/BdP0/ZJ7eYREhXcE4izCABLp0e8ziFqb0LBNG7Cc=
+go.step.sm/crypto v0.86.0 h1:ORItETVOEAo0+rfCm0VKSAolLtoxMSL+pOKfvUeR4MM=
+go.step.sm/crypto v0.86.0/go.mod h1:G+SbDNGA8ZYZBOXYJnxZLJnVCWp3RIKMF+ECS8G0Qug=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
 go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
 go.yaml.in/yaml/v2 v2.4.4 h1:tuyd0P+2Ont/d6e2rl3be67goVK4R6deVxCUX5vyPaQ=
