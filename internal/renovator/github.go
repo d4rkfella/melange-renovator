@@ -87,6 +87,8 @@ func ensurePR(
 		defaultBranch = repoInfo.GetDefaultBranch()
 	}
 
+	rebaseCommitted := false
+
 	if prExists {
 		prURL = openPR.GetHTMLURL()
 
@@ -137,15 +139,29 @@ func ensurePR(
 			}
 		}
 
+		manualRebase := dashboardChecks.RebaseAll ||
+			dashboardChecks.RebasePR[prBranch] ||
+			isRebaseRequested(openPR.GetBody())
+
 		rebaseNeeded := shouldRebase(
-			dashboardChecks,
-			openPR,
-			prBranch,
+			manualRebase,
 			rebaseWhen,
 			hasConflict,
 			stale,
 			requireUpToDate,
 		)
+
+		if rebaseNeeded && !manualRebase {
+			modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
+			if mErr != nil {
+				log.Warn("could not determine if branch was modified, skipping automatic rebase", "error", mErr)
+				rebaseNeeded = false
+			} else if modified {
+				log.Info("branch has human commits, skipping automatic rebase (request manual rebase to override)",
+					"pr", openPR.GetNumber())
+				rebaseNeeded = false
+			}
+		}
 
 		var remoteFile *github.RepositoryContent
 		err = withRetry(ctx, 3, func() error {
@@ -233,6 +249,8 @@ func ensurePR(
 						log.Warn("failed to uncheck rebase box in PR body", "error", uErr)
 					}
 				}
+
+				rebaseCommitted = true
 			}
 		}
 	}
@@ -321,11 +339,13 @@ func ensurePR(
 		return "", closedSuperseded, nil
 	}
 
-	if _, err := commitFileWithRetry(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
-		if errors.Is(err, errBranchModifiedByHuman) {
-			return prURL, closedSuperseded, nil
+	if !rebaseCommitted {
+		if _, err := commitFileWithRetry(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
+			if errors.Is(err, errBranchModifiedByHuman) {
+				return prURL, closedSuperseded, nil
+			}
+			return "", nil, fmt.Errorf("committing update to %s: %w", prBranch, err)
 		}
-		return "", nil, fmt.Errorf("committing update to %s: %w", prBranch, err)
 	}
 
 	if !prExists {
@@ -385,8 +405,6 @@ func commitFileWithRetry(
 			return "", fmt.Errorf("checking branch modification status: %w", mErr)
 		}
 		if modified {
-			log.Warn("branch has commits from someone other than this tool, leaving it untouched",
-				"branch", prBranch)
 			return "", errBranchModifiedByHuman
 		}
 		targetBranch = prBranch
@@ -571,6 +589,8 @@ func isBranchStale(ctx context.Context, gh *github.Client, owner, repo, defaultB
 }
 
 func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defaultBranch, prBranch string) (bool, error) {
+	log := clog.FromContext(ctx)
+
 	comp, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, defaultBranch, prBranch, nil)
 	if err != nil {
 		return false, fmt.Errorf("comparing commits against base: %w", err)
@@ -601,6 +621,16 @@ func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defau
 			strings.Contains(strings.ToLower(gitCommitterEmail), expectedDefaultEmail) {
 			continue
 		}
+
+		log.Warn("commit did not match expected bot identity, treating branch as human-modified",
+			"branch", prBranch,
+			"commit_sha", c.GetSHA(),
+			"author_login", authorLogin,
+			"author_email", gitAuthorEmail,
+			"committer_email", gitCommitterEmail,
+			"bot_actor", botActor,
+			"bot_email", botEmail,
+			"expected_default_email", expectedDefaultEmail)
 
 		return true, nil
 	}
@@ -697,19 +727,12 @@ func requiresUpToDateBranch(
 }
 
 func shouldRebase(
-	dashboardChecks dashboardChecks,
-	pr *github.PullRequest,
-	prBranch string,
+	manualRebase bool,
 	rebaseWhen string,
 	hasConflict bool,
 	stale bool,
 	requireUpToDate bool,
 ) bool {
-	manualRebase :=
-		dashboardChecks.RebaseAll ||
-			dashboardChecks.RebasePR[prBranch] ||
-			isRebaseRequested(pr.GetBody())
-
 	if manualRebase {
 		return true
 	}
