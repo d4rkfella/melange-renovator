@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"unicode"
 
 	"github.com/chainguard-dev/clog"
