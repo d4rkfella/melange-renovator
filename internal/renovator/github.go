@@ -31,15 +31,99 @@ func ensurePR(
 	rebaseWhen string,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
-	var closedSuperseded []int
 
-	content, err := os.ReadFile(filePath)
+	content, fileAPIPath, err := readPackageFile(filePath)
 	if err != nil {
-		return "", nil, fmt.Errorf("reading file: %w", err)
+		return "", nil, err
 	}
-	fileAPIPath := strings.TrimPrefix(filePath, "/github/workspace/")
 
-	var branchExists bool
+	branchExists, openPR, err := locateOpenPR(ctx, gh, owner, repo, prBranch, dryRun)
+	if err != nil {
+		return "", nil, err
+	}
+
+	defaultBranch := getDefaultBranch(ctx, gh, owner, repo)
+
+	prURL := ""
+	rebased := false
+
+	if openPR != nil {
+		openPR, err = retargetPRBase(ctx, gh, owner, repo, openPR, defaultBranch, dryRun)
+		if err != nil {
+			return "", nil, err
+		}
+		prURL = openPR.GetHTMLURL()
+
+		rebaseNeeded, _ := computeRebaseDecision(ctx, gh, owner, repo, defaultBranch, prBranch, openPR, rebaseWhen, dashboardChecks)
+
+		upToDate, err := branchContentUpToDate(ctx, gh, owner, repo, fileAPIPath, prBranch, openPR.GetTitle(), content, prTitle)
+		if err != nil {
+			return "", nil, err
+		}
+
+		if upToDate && !rebaseNeeded {
+			log.Debug("content and title unchanged and branch up to date, nothing to do")
+			return prURL, nil, nil
+		}
+
+		if rebaseNeeded && !dryRun {
+			if err := executeRebase(ctx, gh, owner, repo, defaultBranch, prBranch, fileAPIPath, content, prTitle, openPR); err != nil {
+				return "", nil, err
+			}
+			rebased = true
+		}
+	}
+
+	prExists := openPR != nil
+	var closedSuperseded []int
+	if !sequential {
+		closedSuperseded, prExists, err = closeSupersededPRs(ctx, gh, owner, repo, pkgName, fileAPIPath, prBranch, prTitle, result, prExists, dryRun)
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	if dryRun {
+		return "", closedSuperseded, nil
+	}
+
+	if !rebased {
+		if _, err := pushBranchContent(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
+			if errors.Is(err, errBranchModifiedByHuman) {
+				return prURL, closedSuperseded, nil
+			}
+			return "", nil, fmt.Errorf("committing update to %s: %w", prBranch, err)
+		}
+	}
+
+	if !prExists {
+		url, err := createPullRequest(ctx, gh, owner, repo, prBranch, defaultBranch, prTitle, prBody)
+		if err != nil {
+			return "", nil, err
+		}
+		prURL = url
+	}
+
+	return prURL, closedSuperseded, nil
+}
+
+func readPackageFile(filePath string) (content []byte, fileAPIPath string, err error) {
+	content, err = os.ReadFile(filePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading file: %w", err)
+	}
+	fileAPIPath = strings.TrimPrefix(filePath, "/github/workspace/")
+	return content, fileAPIPath, nil
+}
+
+func locateOpenPR(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, prBranch string,
+	dryRun bool,
+) (branchExists bool, openPR *github.PullRequest, err error) {
+	log := clog.FromContext(ctx)
+
 	err = withRetry(ctx, 3, func() error {
 		_, resp, e := gh.Repositories.GetBranch(ctx, owner, repo, prBranch, 0)
 		branchExists = e == nil
@@ -49,7 +133,7 @@ func ensurePR(
 		return nil
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("checking branch existence: %w", err)
+		return false, nil, fmt.Errorf("checking branch existence: %w", err)
 	}
 
 	var branchPRs []*github.PullRequest
@@ -62,10 +146,9 @@ func ensurePR(
 		return e
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("checking for existing branch PRs: %w", err)
+		return false, nil, fmt.Errorf("checking for existing branch PRs: %w", err)
 	}
 
-	var openPR *github.PullRequest
 	if len(branchPRs) > 0 {
 		openPR = branchPRs[0]
 	}
@@ -78,331 +161,288 @@ func ensurePR(
 		openPR = reused
 	}
 
-	prExists := openPR != nil
-	var prURL string
-
-	repoInfo, _, rErr := gh.Repositories.Get(ctx, owner, repo)
-	defaultBranch := "main"
-	if rErr == nil {
-		defaultBranch = repoInfo.GetDefaultBranch()
-	}
-
-	// Tracks whether the rebase path already committed+pushed the desired
-	// content, so we don't fall through into a second, redundant commit
-	// (and don't re-run isBranchModified against a commit we just made).
-	rebaseCommitted := false
-
-	if prExists {
-		prURL = openPR.GetHTMLURL()
-
-		fullPR, _, pErr := gh.PullRequests.Get(ctx, owner, repo, openPR.GetNumber())
-		if pErr == nil {
-			openPR = fullPR
-		}
-
-		if openPR.GetBase().GetRef() != "" && openPR.GetBase().GetRef() != defaultBranch && !dryRun {
-			log.Info("PR base branch has drifted, retargeting",
-				"pr", openPR.GetNumber(), "old_base", openPR.GetBase().GetRef(), "new_base", defaultBranch)
-			if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
-				Base: &github.PullRequestBranch{Ref: github.Ptr(defaultBranch)},
-			}); uErr != nil {
-				log.Warn("failed to retarget PR base branch", "error", uErr)
-			}
-		}
-
-		// NOTE: "sequential" (require-sequential) only means "don't
-		// supersede/close an older unmerged PR to jump ahead to a newer
-		// version" — it does not mean "stop maintaining the currently
-		// open PR." So there is no early-return here. Retargeting,
-		// staleness/conflict checks, rebasing, and content updates all
-		// still apply normally regardless of sequential. The only place
-		// sequential actually changes behavior is the supersede-and-close
-		// loop further below, which is already gated on !sequential.
-
-		hasConflict := isBranchConflicted(openPR)
-
-		stale, sErr := isBranchStale(ctx, gh, owner, repo, defaultBranch, prBranch)
-		if sErr != nil {
-			log.Warn("could not determine staleness", "error", sErr)
-		}
-
-		requireUpToDate := false
-
-		if rebaseWhen == "auto" {
-			requireUpToDate, err = requiresUpToDateBranch(
-				ctx,
-				gh,
-				owner,
-				repo,
-				defaultBranch,
-			)
-
-			if err != nil {
-				log.Warn(
-					"could not determine branch protection requirements",
-					"error",
-					err,
-				)
-			}
-		}
-
-		// Computed once here so both shouldRebase and the human-edit guard
-		// below use the exact same notion of "an explicit manual rebase
-		// was requested" (dashboard checkbox / label / PR body checkbox).
-		manualRebase := dashboardChecks.RebaseAll ||
-			dashboardChecks.RebasePR[prBranch] ||
-			isRebaseRequested(openPR.GetBody())
-
-		rebaseNeeded := shouldRebase(
-			manualRebase,
-			rebaseWhen,
-			hasConflict,
-			stale,
-			requireUpToDate,
-		)
-
-		// Mirrors upstream Renovate: automatic rebase triggers (stale,
-		// conflicted, auto) never touch a branch that has commits from
-		// someone other than this tool. Only an explicit manual rebase
-		// request overrides this and force-recreates the branch, which
-		// discards those edits.
-		if rebaseNeeded && !manualRebase {
-			modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
-			if mErr != nil {
-				log.Warn("could not determine if branch was modified, skipping automatic rebase", "error", mErr)
-				rebaseNeeded = false
-			} else if modified {
-				log.Info("branch has human commits, skipping automatic rebase (request manual rebase to override)",
-					"pr", openPR.GetNumber())
-				rebaseNeeded = false
-			}
-		}
-
-		var remoteFile *github.RepositoryContent
-		err = withRetry(ctx, 3, func() error {
-			var e error
-			remoteFile, _, _, e = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-				&github.RepositoryContentGetOptions{Ref: prBranch})
-			return e
-		})
-		if err != nil {
-			return "", nil, fmt.Errorf("fetching file from PR branch: %w", err)
-		}
-
-		remoteContent, _ := remoteFile.GetContent()
-
-		oldFP := fingerprint(remoteContent, openPR.GetTitle())
-		newFP := fingerprint(string(content), prTitle)
-
-		if oldFP == newFP && !rebaseNeeded {
-			log.Debug("content and title unchanged and branch up to date, nothing to do")
-			return prURL, nil, nil
-		}
-
-		if rebaseNeeded {
-			if !dryRun {
-				mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
-				if gErr != nil {
-					return "", nil, fmt.Errorf("getting default branch ref for rebase: %w", gErr)
-				}
-				latestMainSHA := mainRef.GetObject().GetSHA()
-
-				mainCommit, _, gErr := gh.Git.GetCommit(ctx, owner, repo, latestMainSHA)
-				if gErr != nil {
-					return "", nil, fmt.Errorf("getting main commit tree: %w", gErr)
-				}
-
-				blob, _, gErr := gh.Git.CreateBlob(ctx, owner, repo, github.Blob{
-					Content:  github.Ptr(string(content)),
-					Encoding: github.Ptr("utf-8"),
-				})
-				if gErr != nil {
-					return "", nil, fmt.Errorf("creating blob for rebase: %w", gErr)
-				}
-
-				newTree, _, gErr := gh.Git.CreateTree(ctx, owner, repo, mainCommit.Tree.GetSHA(), []*github.TreeEntry{
-					{
-						Path: new(fileAPIPath),
-						Mode: new("100644"),
-						Type: new("blob"),
-						SHA:  blob.SHA,
-					},
-				})
-				if gErr != nil {
-					return "", nil, fmt.Errorf("creating tree for rebase: %w", gErr)
-				}
-
-				newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
-					Message: new(prTitle),
-					Tree:    newTree,
-					Parents: []*github.Commit{{SHA: github.Ptr(latestMainSHA)}},
-				}, nil)
-				if gErr != nil {
-					return "", nil, fmt.Errorf("creating rebase commit: %w", gErr)
-				}
-
-				_, _, uErr := gh.Git.UpdateRef(
-					ctx,
-					owner,
-					repo,
-					"refs/heads/"+prBranch,
-					github.UpdateRef{
-						SHA:   newCommit.GetSHA(),
-						Force: new(true),
-					},
-				)
-				if uErr != nil {
-					return "", nil, fmt.Errorf("force-pushing branch rebase: %w", uErr)
-				}
-				log.Info("successfully force-pushed branch to clean rebase commit", "pr", openPR.GetNumber())
-
-				uncheckedBody := uncheckRebaseBox(openPR.GetBody())
-				if uncheckedBody != openPR.GetBody() {
-					if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
-						Body: github.Ptr(uncheckedBody),
-					}); uErr != nil {
-						log.Warn("failed to uncheck rebase box in PR body", "error", uErr)
-					}
-				}
-
-				rebaseCommitted = true
-			}
-		}
-	}
-
-	if !sequential {
-		var allPRs []*github.PullRequest
-		err = withRetry(ctx, 3, func() error {
-			var e error
-			allPRs, _, e = gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
-			return e
-		})
-		if err != nil {
-			return "", nil, fmt.Errorf("listing all open PRs: %w", err)
-		}
-
-		for _, pr := range allPRs {
-			if !strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
-				continue
-			}
-			hasAutomationLabel := false
-			for _, label := range pr.Labels {
-				if label.GetName() == "automated pr" {
-					hasAutomationLabel = true
-					break
-				}
-			}
-			if !hasAutomationLabel {
-				continue
-			}
-
-			remoteFile, _, _, gErr := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
-				&github.RepositoryContentGetOptions{Ref: prBranch})
-			if gErr != nil {
-				log.Warn("could not fetch config from PR branch, skipping supersede check",
-					"number", pr.GetNumber(), "error", gErr)
-				continue
-			}
-			remoteContent, cErr := remoteFile.GetContent()
-			if cErr != nil {
-				continue
-			}
-
-			tmp, tErr := os.CreateTemp("", "melange-*.yaml")
-			if tErr != nil {
-				continue
-			}
-			tmpName := tmp.Name()
-			_, _ = tmp.WriteString(remoteContent)
-			_ = tmp.Close()
-			remoteCfg, pErr := config.ParseConfiguration(ctx, tmpName)
-			_ = os.Remove(tmpName)
-			if pErr != nil {
-				continue
-			}
-
-			if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
-				continue
-			}
-
-			if dryRun {
-				log.Info("DRY RUN: would close superseded PR and open new one",
-					"closing_number", pr.GetNumber(), "new_version", result.Version)
-				prExists = false
-				continue
-			}
-
-			if _, _, cErr := gh.Issues.CreateComment(ctx, owner, repo, pr.GetNumber(), &github.IssueComment{
-				Body: github.Ptr(fmt.Sprintf(
-					"This PR has been superseded by a newer version update: **%s**. Closing automatically.",
-					prTitle)),
-			}); cErr != nil {
-				log.Warn("failed to post superseded comment", "number", pr.GetNumber(), "error", cErr)
-			}
-			if _, _, eErr := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
-				State: github.Ptr("closed"),
-			}); eErr != nil {
-				log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", eErr)
-			} else {
-				closedSuperseded = append(closedSuperseded, pr.GetNumber())
-			}
-			prExists = false
-		}
-	}
-
-	if dryRun {
-		return "", closedSuperseded, nil
-	}
-
-	if !rebaseCommitted {
-		if _, err := commitFileWithRetry(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
-			if errors.Is(err, errBranchModifiedByHuman) {
-				return prURL, closedSuperseded, nil
-			}
-			return "", nil, fmt.Errorf("committing update to %s: %w", prBranch, err)
-		}
-	}
-
-	if !prExists {
-		var newPR *github.PullRequest
-		createErr := withRetry(ctx, 3, func() error {
-			var e error
-			newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
-				Title: new(prTitle),
-				Body:  new(prBody),
-				Head:  new(prBranch),
-				Base:  new(defaultBranch),
-			})
-			return e
-		})
-		if createErr != nil {
-			if isPRAlreadyExistsErr(createErr) {
-				log.Warn("PR was created concurrently by another run, treating as success")
-				return "", closedSuperseded, nil
-			}
-			if is5xxErr(createErr) {
-				log.Warn("server error creating PR, deleting branch so next run starts clean",
-					"branch", prBranch, "error", createErr)
-				if _, dErr := gh.Git.DeleteRef(ctx, owner, repo, "heads/"+prBranch); dErr != nil {
-					log.Warn("failed to delete branch after failed PR creation", "error", dErr)
-				}
-			}
-			return "", nil, fmt.Errorf("creating PR: %w", createErr)
-		}
-
-		if _, _, err = gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(),
-			[]string{"automated pr", "request-version-update"}); err != nil {
-			log.Warn("failed to add labels", "error", err)
-		}
-
-		log.Info("PR is ready!", "url", newPR.GetHTMLURL())
-		prURL = newPR.GetHTMLURL()
-	}
-
-	return prURL, closedSuperseded, nil
+	return branchExists, openPR, nil
 }
 
-func commitFileWithRetry(
+func getDefaultBranch(ctx context.Context, gh *github.Client, owner, repo string) string {
+	repoInfo, _, err := gh.Repositories.Get(ctx, owner, repo)
+	if err != nil {
+		return "main"
+	}
+	return repoInfo.GetDefaultBranch()
+}
+
+func retargetPRBase(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo string,
+	openPR *github.PullRequest,
+	defaultBranch string,
+	dryRun bool,
+) (*github.PullRequest, error) {
+	log := clog.FromContext(ctx)
+
+	fullPR, _, err := gh.PullRequests.Get(ctx, owner, repo, openPR.GetNumber())
+	if err == nil {
+		openPR = fullPR
+	}
+
+	if openPR.GetBase().GetRef() != "" && openPR.GetBase().GetRef() != defaultBranch && !dryRun {
+		log.Info("PR base branch has drifted, retargeting",
+			"pr", openPR.GetNumber(), "old_base", openPR.GetBase().GetRef(), "new_base", defaultBranch)
+		if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
+			Base: &github.PullRequestBranch{Ref: github.Ptr(defaultBranch)},
+		}); uErr != nil {
+			log.Warn("failed to retarget PR base branch", "error", uErr)
+		}
+	}
+
+	return openPR, nil
+}
+
+func computeRebaseDecision(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, defaultBranch, prBranch string,
+	openPR *github.PullRequest,
+	rebaseWhen string,
+	dashboardChecks dashboardChecks,
+) (rebaseNeeded, manualRebase bool) {
+	log := clog.FromContext(ctx)
+
+	hasConflict := isBranchConflicted(openPR)
+
+	stale, sErr := isBranchStale(ctx, gh, owner, repo, defaultBranch, prBranch)
+	if sErr != nil {
+		log.Warn("could not determine staleness", "error", sErr)
+	}
+
+	requireUpToDate := false
+	if rebaseWhen == "auto" {
+		var ruErr error
+		requireUpToDate, ruErr = requiresUpToDateBranch(ctx, gh, owner, repo, defaultBranch)
+		if ruErr != nil {
+			log.Warn("could not determine branch protection requirements", "error", ruErr)
+		}
+	}
+
+	manualRebase = dashboardChecks.RebaseAll ||
+		dashboardChecks.RebasePR[prBranch] ||
+		isRebaseRequested(openPR.GetBody())
+
+	rebaseNeeded = shouldRebase(manualRebase, rebaseWhen, hasConflict, stale, requireUpToDate)
+
+	if rebaseNeeded && !manualRebase {
+		modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
+		if mErr != nil {
+			log.Warn("could not determine if branch was modified, skipping automatic rebase", "error", mErr)
+			rebaseNeeded = false
+		} else if modified {
+			log.Info("branch has human commits, skipping automatic rebase (request manual rebase to override)",
+				"pr", openPR.GetNumber())
+			rebaseNeeded = false
+		}
+	}
+
+	return rebaseNeeded, manualRebase
+}
+
+func branchContentUpToDate(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, fileAPIPath, prBranch, prevTitle string,
+	content []byte,
+	newTitle string,
+) (bool, error) {
+	var remoteFile *github.RepositoryContent
+	err := withRetry(ctx, 3, func() error {
+		var e error
+		remoteFile, _, _, e = gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+			&github.RepositoryContentGetOptions{Ref: prBranch})
+		return e
+	})
+	if err != nil {
+		return false, fmt.Errorf("fetching file from PR branch: %w", err)
+	}
+
+	remoteContent, _ := remoteFile.GetContent()
+
+	oldFP := fingerprint(remoteContent, prevTitle)
+	newFP := fingerprint(string(content), newTitle)
+
+	return oldFP == newFP, nil
+}
+
+func executeRebase(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, defaultBranch, prBranch, fileAPIPath string,
+	content []byte,
+	prTitle string,
+	openPR *github.PullRequest,
+) error {
+	log := clog.FromContext(ctx)
+
+	mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
+	if gErr != nil {
+		return fmt.Errorf("getting default branch ref for rebase: %w", gErr)
+	}
+	latestMainSHA := mainRef.GetObject().GetSHA()
+
+	mainCommit, _, gErr := gh.Git.GetCommit(ctx, owner, repo, latestMainSHA)
+	if gErr != nil {
+		return fmt.Errorf("getting main commit tree: %w", gErr)
+	}
+
+	blob, _, gErr := gh.Git.CreateBlob(ctx, owner, repo, github.Blob{
+		Content:  github.Ptr(string(content)),
+		Encoding: github.Ptr("utf-8"),
+	})
+	if gErr != nil {
+		return fmt.Errorf("creating blob for rebase: %w", gErr)
+	}
+
+	newTree, _, gErr := gh.Git.CreateTree(ctx, owner, repo, mainCommit.Tree.GetSHA(), []*github.TreeEntry{
+		{
+			Path: new(fileAPIPath),
+			Mode: new("100644"),
+			Type: new("blob"),
+			SHA:  blob.SHA,
+		},
+	})
+	if gErr != nil {
+		return fmt.Errorf("creating tree for rebase: %w", gErr)
+	}
+
+	newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
+		Message: new(prTitle),
+		Tree:    newTree,
+		Parents: []*github.Commit{{SHA: github.Ptr(latestMainSHA)}},
+	}, nil)
+	if gErr != nil {
+		return fmt.Errorf("creating rebase commit: %w", gErr)
+	}
+
+	_, _, uErr := gh.Git.UpdateRef(
+		ctx,
+		owner,
+		repo,
+		"refs/heads/"+prBranch,
+		github.UpdateRef{
+			SHA:   newCommit.GetSHA(),
+			Force: new(true),
+		},
+	)
+	if uErr != nil {
+		return fmt.Errorf("force-pushing branch rebase: %w", uErr)
+	}
+	log.Info("successfully force-pushed branch to clean rebase commit", "pr", openPR.GetNumber())
+
+	uncheckedBody := uncheckRebaseBox(openPR.GetBody())
+	if uncheckedBody != openPR.GetBody() {
+		if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
+			Body: github.Ptr(uncheckedBody),
+		}); uErr != nil {
+			log.Warn("failed to uncheck rebase box in PR body", "error", uErr)
+		}
+	}
+
+	return nil
+}
+
+func closeSupersededPRs(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, pkgName, fileAPIPath, prBranch, prTitle string,
+	result versionResult,
+	prExists bool,
+	dryRun bool,
+) (closedSuperseded []int, stillExists bool, err error) {
+	log := clog.FromContext(ctx)
+	stillExists = prExists
+
+	var allPRs []*github.PullRequest
+	err = withRetry(ctx, 3, func() error {
+		var e error
+		allPRs, _, e = gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{State: "open"})
+		return e
+	})
+	if err != nil {
+		return nil, stillExists, fmt.Errorf("listing all open PRs: %w", err)
+	}
+
+	for _, pr := range allPRs {
+		if !strings.HasPrefix(pr.GetTitle(), pkgName+"/") {
+			continue
+		}
+		hasAutomationLabel := false
+		for _, label := range pr.Labels {
+			if label.GetName() == "automated pr" {
+				hasAutomationLabel = true
+				break
+			}
+		}
+		if !hasAutomationLabel {
+			continue
+		}
+
+		remoteFile, _, _, gErr := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+			&github.RepositoryContentGetOptions{Ref: prBranch})
+		if gErr != nil {
+			log.Warn("could not fetch config from PR branch, skipping supersede check",
+				"number", pr.GetNumber(), "error", gErr)
+			continue
+		}
+		remoteContent, cErr := remoteFile.GetContent()
+		if cErr != nil {
+			continue
+		}
+
+		tmp, tErr := os.CreateTemp("", "melange-*.yaml")
+		if tErr != nil {
+			continue
+		}
+		tmpName := tmp.Name()
+		_, _ = tmp.WriteString(remoteContent)
+		_ = tmp.Close()
+		remoteCfg, pErr := config.ParseConfiguration(ctx, tmpName)
+		_ = os.Remove(tmpName)
+		if pErr != nil {
+			continue
+		}
+
+		if compareVersions(ctx, remoteCfg.Package.Version, result.Version) >= 0 {
+			continue
+		}
+
+		if dryRun {
+			log.Info("DRY RUN: would close superseded PR and open new one",
+				"closing_number", pr.GetNumber(), "new_version", result.Version)
+			stillExists = false
+			continue
+		}
+
+		if _, _, cErr := gh.Issues.CreateComment(ctx, owner, repo, pr.GetNumber(), &github.IssueComment{
+			Body: github.Ptr(fmt.Sprintf(
+				"This PR has been superseded by a newer version update: **%s**. Closing automatically.",
+				prTitle)),
+		}); cErr != nil {
+			log.Warn("failed to post superseded comment", "number", pr.GetNumber(), "error", cErr)
+		}
+		if _, _, eErr := gh.PullRequests.Edit(ctx, owner, repo, pr.GetNumber(), &github.PullRequest{
+			State: github.Ptr("closed"),
+		}); eErr != nil {
+			log.Warn("failed to close outdated PR", "number", pr.GetNumber(), "error", eErr)
+		} else {
+			closedSuperseded = append(closedSuperseded, pr.GetNumber())
+		}
+		stillExists = false
+	}
+
+	return closedSuperseded, stillExists, nil
+}
+
+func pushBranchContent(
 	ctx context.Context,
 	gh *github.Client,
 	owner, repo, defaultBranch, prBranch string,
@@ -513,6 +553,48 @@ func updateBranchRef(ctx context.Context, gh *github.Client, owner, repo, branch
 		return fmt.Errorf("updating branch %s: %w", branch, err)
 	}
 	return nil
+}
+
+func createPullRequest(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, prBranch, defaultBranch, prTitle, prBody string,
+) (string, error) {
+	log := clog.FromContext(ctx)
+
+	var newPR *github.PullRequest
+	err := withRetry(ctx, 3, func() error {
+		var e error
+		newPR, _, e = gh.PullRequests.Create(ctx, owner, repo, &github.NewPullRequest{
+			Title: new(prTitle),
+			Body:  new(prBody),
+			Head:  new(prBranch),
+			Base:  new(defaultBranch),
+		})
+		return e
+	})
+	if err != nil {
+		if isPRAlreadyExistsErr(err) {
+			log.Warn("PR was created concurrently by another run, treating as success")
+			return "", nil
+		}
+		if is5xxErr(err) {
+			log.Warn("server error creating PR, deleting branch so next run starts clean",
+				"branch", prBranch, "error", err)
+			if _, dErr := gh.Git.DeleteRef(ctx, owner, repo, "heads/"+prBranch); dErr != nil {
+				log.Warn("failed to delete branch after failed PR creation", "error", dErr)
+			}
+		}
+		return "", fmt.Errorf("creating PR: %w", err)
+	}
+
+	if _, _, lErr := gh.Issues.AddLabelsToIssue(ctx, owner, repo, newPR.GetNumber(),
+		[]string{"automated pr", "request-version-update"}); lErr != nil {
+		log.Warn("failed to add labels", "error", lErr)
+	}
+
+	log.Info("PR is ready!", "url", newPR.GetHTMLURL())
+	return newPR.GetHTMLURL(), nil
 }
 
 func isPRAlreadyExistsErr(err error) bool {
