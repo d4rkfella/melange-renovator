@@ -161,6 +161,12 @@ func RunContext(ctx context.Context, opts Options) {
 
 	ghClient = github.NewClient(nil).WithAuthToken(opts.Token)
 
+	bot, err := detectBotLogin(ctx, ghClient)
+	if err != nil {
+		log.Error("failed to detect bot identity", "error", err)
+		os.Exit(1)
+	}
+
 	if !opts.DryRun {
 		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
 		if len(repoParts) != 2 {
@@ -176,7 +182,7 @@ func RunContext(ctx context.Context, opts Options) {
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(ctx, ghClient, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen)
+			dep, err := run(ctx, ghClient, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -235,7 +241,7 @@ func RunContext(ctx context.Context, opts Options) {
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string) (*renovateDep, error) {
+func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -392,7 +398,7 @@ func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *con
 		filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
-		checks, rebaseWhen,
+		checks, rebaseWhen, bot,
 	)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())

@@ -17,6 +17,37 @@ import (
 
 var errBranchModifiedByHuman = errors.New("branch has commits from someone other than this tool and will not be automatically rebuilt; resolve conflicts manually")
 
+func detectBotLogin(ctx context.Context, gh *github.Client) (string, error) {
+	reqBody := struct {
+		Query string `json:"query"`
+	}{
+		Query: `query { viewer { login } }`,
+	}
+
+	req, err := gh.NewRequest("POST", "graphql", reqBody)
+	if err != nil {
+		return "", fmt.Errorf("building viewer identity query: %w", err)
+	}
+
+	var result struct {
+		Data struct {
+			Viewer struct {
+				Login string `json:"login"`
+			} `json:"viewer"`
+		} `json:"data"`
+	}
+
+	if _, err := gh.Do(ctx, req, &result); err != nil {
+		return "", fmt.Errorf("querying authenticated identity: %w", err)
+	}
+
+	login := result.Data.Viewer.Login
+	if login == "" {
+		return "", errors.New("viewer query returned an empty login")
+	}
+	return login, nil
+}
+
 func ensurePR(
 	ctx context.Context,
 	gh *github.Client,
@@ -29,6 +60,7 @@ func ensurePR(
 	dryRun bool,
 	dashboardChecks dashboardChecks,
 	rebaseWhen string,
+	bot string,
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 
@@ -62,7 +94,7 @@ func ensurePR(
 			return "", []int{openPR.GetNumber()}, nil
 		}
 
-		rebaseNeeded, _ := computeRebaseDecision(ctx, gh, owner, repo, defaultBranch, prBranch, openPR, rebaseWhen, dashboardChecks)
+		rebaseNeeded, _ := computeRebaseDecision(ctx, gh, owner, repo, defaultBranch, prBranch, openPR, rebaseWhen, dashboardChecks, bot)
 
 		upToDate, err := branchContentUpToDate(ctx, gh, owner, repo, fileAPIPath, prBranch, openPR.GetTitle(), content, prTitle)
 		if err != nil {
@@ -96,7 +128,7 @@ func ensurePR(
 	}
 
 	if !rebased {
-		if _, err := pushBranchContent(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle); err != nil {
+		if _, err := pushBranchContent(ctx, gh, owner, repo, defaultBranch, prBranch, branchExists, fileAPIPath, content, prTitle, bot); err != nil {
 			if errors.Is(err, errBranchModifiedByHuman) {
 				return prURL, closedSuperseded, nil
 			}
@@ -283,6 +315,7 @@ func computeRebaseDecision(
 	openPR *github.PullRequest,
 	rebaseWhen string,
 	dashboardChecks dashboardChecks,
+	bot string,
 ) (rebaseNeeded, manualRebase bool) {
 	log := clog.FromContext(ctx)
 
@@ -309,7 +342,7 @@ func computeRebaseDecision(
 	rebaseNeeded = shouldRebase(manualRebase, rebaseWhen, hasConflict, stale, requireUpToDate)
 
 	if rebaseNeeded && !manualRebase {
-		modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
+		modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch, bot)
 		if mErr != nil {
 			log.Warn("could not determine if branch was modified, skipping automatic rebase", "error", mErr)
 			rebaseNeeded = false
@@ -526,12 +559,13 @@ func pushBranchContent(
 	relPath string,
 	content []byte,
 	commitMessage string,
+	bot string,
 ) (newCommitSHA string, err error) {
 	log := clog.FromContext(ctx)
 
 	targetBranch := defaultBranch
 	if branchExists {
-		modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch)
+		modified, mErr := isBranchModified(ctx, gh, owner, repo, defaultBranch, prBranch, bot)
 		if mErr != nil {
 			return "", fmt.Errorf("checking branch modification status: %w", mErr)
 		}
@@ -761,7 +795,7 @@ func isBranchStale(ctx context.Context, gh *github.Client, owner, repo, defaultB
 	return comp.GetBehindBy() > 0, nil
 }
 
-func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defaultBranch, prBranch string) (bool, error) {
+func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defaultBranch, prBranch, bot string) (bool, error) {
 	log := clog.FromContext(ctx)
 
 	comp, _, err := gh.Repositories.CompareCommits(ctx, owner, repo, defaultBranch, prBranch, nil)
@@ -772,26 +806,10 @@ func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defau
 		return false, nil
 	}
 
-	botActor := os.Getenv("GITHUB_ACTOR")
-	if botActor == "" {
-		botActor = "github-actions[bot]"
-	}
-	botEmail := os.Getenv("GIT_AUTHOR_EMAIL")
-
 	for _, c := range comp.Commits {
 		authorLogin := c.GetAuthor().GetLogin()
-		gitAuthorEmail := c.GetCommit().GetAuthor().GetEmail()
-		gitCommitterEmail := c.GetCommit().GetCommitter().GetEmail()
 
-		if authorLogin != "" && strings.EqualFold(authorLogin, botActor) {
-			continue
-		}
-		if botEmail != "" && (strings.EqualFold(gitAuthorEmail, botEmail) || strings.EqualFold(gitCommitterEmail, botEmail)) {
-			continue
-		}
-		expectedDefaultEmail := fmt.Sprintf("%s@users.noreply.github.com", botActor)
-		if strings.Contains(strings.ToLower(gitAuthorEmail), expectedDefaultEmail) ||
-			strings.Contains(strings.ToLower(gitCommitterEmail), expectedDefaultEmail) {
+		if authorLogin != "" && strings.EqualFold(authorLogin, bot) {
 			continue
 		}
 
@@ -799,11 +817,9 @@ func isBranchModified(ctx context.Context, gh *github.Client, owner, repo, defau
 			"branch", prBranch,
 			"commit_sha", c.GetSHA(),
 			"author_login", authorLogin,
-			"author_email", gitAuthorEmail,
-			"committer_email", gitCommitterEmail,
-			"bot_actor", botActor,
-			"bot_email", botEmail,
-			"expected_default_email", expectedDefaultEmail)
+			"author_email", c.GetCommit().GetAuthor().GetEmail(),
+			"committer_email", c.GetCommit().GetCommitter().GetEmail(),
+			"expected_bot_login", bot)
 
 		return true, nil
 	}
