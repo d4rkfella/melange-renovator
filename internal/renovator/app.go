@@ -39,6 +39,10 @@ type Options struct {
 }
 
 func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
+	if err := trimTrailingWhitespace(configPath); err != nil {
+		return fmt.Errorf("trimming trailing whitespace: %w", err)
+	}
+
 	rc, err := renovate.New(renovate.WithConfig(configPath))
 	if err != nil {
 		return fmt.Errorf("creating renovate client: %w", err)
@@ -54,6 +58,21 @@ func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit stri
 	}
 
 	return nil
+}
+
+func trimTrailingWhitespace(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
 func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
