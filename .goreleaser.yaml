@@ -3,21 +3,31 @@ project_name: melange-renovator
 
 builds:
   - id: melange-build
-    env: [CGO_ENABLED=0]
-    goos: [linux]
-    goarch: [amd64, arm64]
+    main: ./cmd/melange-renovator
+    binary: melange-renovator
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commitSHA={{.Commit}} -X main.buildDate={{.Date}}
 
 archives:
-  - formats: tar.gz
+  - formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
 sboms:
   - artifacts: archive
     documents:
       - "{{ .ArtifactName }}.spdx.json"
-    args: ["$artifact", "--output", "spdx-json=$document"]
+    args:
+      - "$artifact"
+      - "--output"
+      - "spdx-json=$document"
 
 checksum:
   name_template: "{{ .ProjectName }}_checksums.txt"
@@ -35,7 +45,13 @@ signs:
 changelog:
   sort: asc
   filters:
-    exclude: ['^docs:', '^test:', '^Merge pull request']
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^Merge pull request"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev.{{ .Timestamp }}"
 
 dockers_v2:
   - ids:
