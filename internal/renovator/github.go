@@ -54,6 +54,14 @@ func ensurePR(
 		}
 		prURL = openPR.GetHTMLURL()
 
+		closed, cErr := closeIfAlreadyOnDefaultBranch(ctx, gh, owner, repo, defaultBranch, fileAPIPath, prBranch, openPR, result, dryRun)
+		if cErr != nil {
+			return "", nil, cErr
+		}
+		if closed {
+			return "", []int{openPR.GetNumber()}, nil
+		}
+
 		rebaseNeeded, _ := computeRebaseDecision(ctx, gh, owner, repo, defaultBranch, prBranch, openPR, rebaseWhen, dashboardChecks)
 
 		upToDate, err := branchContentUpToDate(ctx, gh, owner, repo, fileAPIPath, prBranch, openPR.GetTitle(), content, prTitle)
@@ -198,6 +206,74 @@ func retargetPRBase(
 	}
 
 	return openPR, nil
+}
+
+func closeIfAlreadyOnDefaultBranch(
+	ctx context.Context,
+	gh *github.Client,
+	owner, repo, defaultBranch, fileAPIPath, prBranch string,
+	openPR *github.PullRequest,
+	result versionResult,
+	dryRun bool,
+) (closed bool, err error) {
+	log := clog.FromContext(ctx)
+
+	remoteFile, _, _, gErr := gh.Repositories.GetContents(ctx, owner, repo, fileAPIPath,
+		&github.RepositoryContentGetOptions{Ref: defaultBranch})
+	if gErr != nil {
+		log.Debug("could not fetch file from default branch, skipping already-applied check", "error", gErr)
+		return false, nil
+	}
+	remoteContent, cErr := remoteFile.GetContent()
+	if cErr != nil {
+		return false, nil
+	}
+
+	tmp, tErr := os.CreateTemp("", "melange-*.yaml")
+	if tErr != nil {
+		return false, nil
+	}
+	tmpName := tmp.Name()
+	_, _ = tmp.WriteString(remoteContent)
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	remoteCfg, pErr := config.ParseConfiguration(ctx, tmpName)
+	if pErr != nil {
+		return false, nil
+	}
+
+	if compareVersions(ctx, remoteCfg.Package.Version, result.Version) < 0 {
+		return false, nil
+	}
+
+	log.Info("default branch already has this version or newer, closing PR as redundant",
+		"pr", openPR.GetNumber(), "default_branch_version", remoteCfg.Package.Version, "pr_version", result.Version)
+
+	if dryRun {
+		log.Info("DRY RUN: would close PR as already applied on default branch", "pr", openPR.GetNumber())
+		return true, nil
+	}
+
+	if _, _, cErr := gh.Issues.CreateComment(ctx, owner, repo, openPR.GetNumber(), &github.IssueComment{
+		Body: github.Ptr(fmt.Sprintf(
+			"This update (or a newer one) has already been applied directly to `%s`. Closing this PR as it is no longer needed.",
+			defaultBranch)),
+	}); cErr != nil {
+		log.Warn("failed to post already-applied comment", "pr", openPR.GetNumber(), "error", cErr)
+	}
+
+	if _, _, eErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
+		State: github.Ptr("closed"),
+	}); eErr != nil {
+		return false, fmt.Errorf("closing already-applied PR: %w", eErr)
+	}
+
+	if _, dErr := gh.Git.DeleteRef(ctx, owner, repo, "heads/"+prBranch); dErr != nil {
+		log.Warn("failed to delete branch after closing already-applied PR", "branch", prBranch, "error", dErr)
+	}
+
+	return true, nil
 }
 
 func computeRebaseDecision(
