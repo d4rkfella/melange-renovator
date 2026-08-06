@@ -392,16 +392,41 @@ func executeRebase(
 ) error {
 	log := clog.FromContext(ctx)
 
+	log.Debug("starting rebase operation",
+		"repo", owner+"/"+repo,
+		"pr", openPR.GetNumber(),
+		"default_branch", defaultBranch,
+		"pr_branch", prBranch,
+		"file_path", fileAPIPath,
+	)
+
+	log.Debug("fetching default branch ref",
+		"branch", defaultBranch,
+	)
+
 	mainRef, _, gErr := gh.Git.GetRef(ctx, owner, repo, "heads/"+defaultBranch)
 	if gErr != nil {
 		return fmt.Errorf("getting default branch ref for rebase: %w", gErr)
 	}
 	latestMainSHA := mainRef.GetObject().GetSHA()
 
+	log.Debug("resolved default branch ref",
+		"sha", latestMainSHA,
+	)
+
+	log.Debug("fetching base commit",
+		"sha", latestMainSHA,
+	)
+
 	mainCommit, _, gErr := gh.Git.GetCommit(ctx, owner, repo, latestMainSHA)
 	if gErr != nil {
 		return fmt.Errorf("getting main commit tree: %w", gErr)
 	}
+
+	log.Debug("creating blob for rebased file",
+		"path", fileAPIPath,
+		"size", len(content),
+	)
 
 	blob, _, gErr := gh.Git.CreateBlob(ctx, owner, repo, github.Blob{
 		Content:  github.Ptr(string(content)),
@@ -410,6 +435,15 @@ func executeRebase(
 	if gErr != nil {
 		return fmt.Errorf("creating blob for rebase: %w", gErr)
 	}
+
+	log.Debug("created blob",
+		"blob_sha", blob.GetSHA(),
+	)
+
+	log.Debug("creating tree from base commit",
+		"base_tree", mainCommit.Tree.GetSHA(),
+		"path", fileAPIPath,
+	)
 
 	newTree, _, gErr := gh.Git.CreateTree(ctx, owner, repo, mainCommit.Tree.GetSHA(), []*github.TreeEntry{
 		{
@@ -420,8 +454,17 @@ func executeRebase(
 		},
 	})
 	if gErr != nil {
-		return fmt.Errorf("creating tree for rebase: %w", gErr)
+		return fmt.Errorf("creating tree: %w", gErr)
 	}
+
+	log.Debug("new tree sucessfully created",
+		"tree_sha", newTree.GetSHA(),
+	)
+
+	log.Debug("creating rebase commit",
+		"parent_sha", latestMainSHA,
+		"tree_sha", newTree.GetSHA(),
+	)
 
 	newCommit, _, gErr := gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
 		Message: new(prTitle),
@@ -431,6 +474,16 @@ func executeRebase(
 	if gErr != nil {
 		return fmt.Errorf("creating rebase commit: %w", gErr)
 	}
+
+	log.Debug("created rebase commit",
+		"commit_sha", newCommit.GetSHA(),
+	)
+
+	log.Debug("updating branch ref",
+		"branch", prBranch,
+		"sha", newCommit.GetSHA(),
+		"force", true,
+	)
 
 	_, _, uErr := gh.Git.UpdateRef(
 		ctx,
@@ -445,16 +498,27 @@ func executeRebase(
 	if uErr != nil {
 		return fmt.Errorf("force-pushing branch rebase: %w", uErr)
 	}
-	log.Info("successfully force-pushed branch to clean rebase commit", "pr", openPR.GetNumber())
+
+	log.Debug("updated branch ref successfully")
 
 	uncheckedBody := uncheckRebaseBox(openPR.GetBody())
 	if uncheckedBody != openPR.GetBody() {
+		log.Debug("removing rebase checkbox from PR body")
+
 		if _, _, uErr := gh.PullRequests.Edit(ctx, owner, repo, openPR.GetNumber(), &github.PullRequest{
 			Body: github.Ptr(uncheckedBody),
 		}); uErr != nil {
 			log.Warn("failed to uncheck rebase box in PR body", "error", uErr)
+		} else {
+			log.Debug("updated PR body successfully")
 		}
+	} else {
+		log.Debug("rebase checkbox already unchecked")
 	}
+
+	log.Debug("rebase operation completed",
+		"commit_sha", newCommit.GetSHA(),
+	)
 
 	return nil
 }
