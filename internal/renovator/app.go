@@ -186,6 +186,8 @@ func RunContext(ctx context.Context, opts Options) {
 		os.Exit(1)
 	}
 
+	var s3Client *s3.Client
+
 	if !opts.DryRun {
 		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
 		if len(repoParts) != 2 {
@@ -197,11 +199,30 @@ func RunContext(ctx context.Context, opts Options) {
 		if err != nil {
 			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
 		}
+		var optFns []func(*awscfg.LoadOptions) error
+		if awsOpts.Region != "" {
+			optFns = append(optFns, awscfg.WithRegion(awsOpts.Region))
+		}
+		if awsOpts.AccessKey != "" && awsOpts.SecretKey != "" {
+			creds := credentials.NewStaticCredentialsProvider(awsOpts.AccessKey, awsOpts.SecretKey, "")
+			optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
+		}
+
+		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
+		if err != nil {
+			os.Exit(1)
+		}
+
+		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+			if awsOpts.Endpoint != "" {
+				o.BaseEndpoint = aws.String(awsOpts.Endpoint)
+			}
+		})
 	}
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(ctx, ghClient, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot)
+			dep, err := run(ctx, ghClient, s3Client, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot)
 			if err != nil {
 				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -260,7 +281,7 @@ func RunContext(ctx context.Context, opts Options) {
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string) (*renovateDep, error) {
+func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -290,33 +311,10 @@ func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *con
 		return dep, fmt.Errorf("compiling patterns: %w", err)
 	}
 
-	var s3Client *s3.Client
+	var stateKey string
 	var pkgState packageState
-	stateKey := fmt.Sprintf("state/%s.json", cfg.Package.Name)
 
 	if !dryRun {
-		var optFns []func(*awscfg.LoadOptions) error
-		if awsOpts.Region != "" {
-			optFns = append(optFns, awscfg.WithRegion(awsOpts.Region))
-		}
-		if awsOpts.AccessKey != "" && awsOpts.SecretKey != "" {
-			creds := credentials.NewStaticCredentialsProvider(awsOpts.AccessKey, awsOpts.SecretKey, "")
-			optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
-		}
-
-		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
-		if err != nil {
-			dep.Skipped = true
-			dep.SkipReason = err.Error()
-			return dep, fmt.Errorf("loading AWS config: %w", err)
-		}
-
-		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
-			if awsOpts.Endpoint != "" {
-				o.BaseEndpoint = aws.String(awsOpts.Endpoint)
-			}
-		})
-
 		pkgState, err = loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
 		if err != nil {
 			dep.Skipped = true
@@ -375,7 +373,7 @@ func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *con
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
 		dep.FixedVersion = cfg.Package.Version
 		dep.UpdateAvailable = false
-		if s3Client != nil {
+		if !dryRun {
 			persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
 		}
 		return dep, nil
@@ -432,7 +430,8 @@ func run(ctx context.Context, ghClient *github.Client, filePath string, cfg *con
 		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
 			"closed superseded PR(s) %s in favor of this update", strings.Join(numbers, ", ")))
 	}
-
-	persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
+	if !dryRun {
+		persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
+	}
 	return dep, nil
 }
