@@ -78,8 +78,14 @@ func discoverConfigs(
 		if err != nil {
 			return nil, fmt.Errorf("invalid config file pattern %q: %w", pattern, err)
 		}
+		log.Debug(
+			"Using file pattern for melange config discovery",
+			"pattern", pattern,
+		)
 		patterns = append(patterns, re)
 	}
+
+	var matchedPaths []string
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -124,19 +130,17 @@ func discoverConfigs(
 			return nil
 		}
 
-		if strings.HasPrefix(d.Name(), ".") {
-			return nil
-		}
-
 		if !matchesConfigPattern(relPath, patterns) {
 			return nil
 		}
 
+		matchedPaths = append(matchedPaths, relPath)
+
 		cfg, err := config.ParseConfiguration(ctx, path)
 		if err != nil {
 			log.Debug(
-				"failed to parse as valid melange configuration",
-				"path", path,
+				"Failed to parse configuration file",
+				"path", relPath,
 				"error", err,
 			)
 			return nil
@@ -150,11 +154,6 @@ func discoverConfigs(
 			return nil
 		}
 
-		log.Debug(
-			"discovered melange config",
-			"path", path,
-		)
-
 		found = append(found, discoveredConfig{
 			Path:   path,
 			Config: cfg,
@@ -162,6 +161,14 @@ func discoverConfigs(
 
 		return nil
 	})
+
+	log.Debug(
+		fmt.Sprintf(
+			"Matched %d file(s): %s",
+			len(matchedPaths),
+			strings.Join(matchedPaths, ", "),
+		),
+	)
 
 	return found, err
 }
