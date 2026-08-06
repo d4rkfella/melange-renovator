@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -52,6 +53,7 @@ func ensurePR(
 	ctx context.Context,
 	gh *github.Client,
 	owner, repo string,
+	rootDir string,
 	filePath string,
 	pkgName string,
 	result versionResult,
@@ -64,7 +66,7 @@ func ensurePR(
 ) (string, []int, error) {
 	log := clog.FromContext(ctx)
 
-	content, fileAPIPath, err := readPackageFile(filePath)
+	content, fileAPIPath, err := readPackageFile(rootDir, filePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -147,13 +149,18 @@ func ensurePR(
 	return prURL, closedSuperseded, nil
 }
 
-func readPackageFile(filePath string) (content []byte, fileAPIPath string, err error) {
+func readPackageFile(repoRoot, filePath string) (content []byte, fileAPIPath string, err error) {
 	content, err = os.ReadFile(filePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("reading file: %w", err)
 	}
-	fileAPIPath = strings.TrimPrefix(filePath, "/github/workspace/")
-	return content, fileAPIPath, nil
+
+	fileAPIPath, err = filepath.Rel(repoRoot, filePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("getting repo-relative path: %w", err)
+	}
+
+	return content, filepath.ToSlash(fileAPIPath), nil
 }
 
 func locateOpenPR(

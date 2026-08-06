@@ -236,7 +236,7 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(gctx, ghClient, s3Client, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot, repoOwner, repoName)
+			dep, err := run(gctx, ghClient, s3Client, rootDir, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot, repoOwner, repoName)
 			if err != nil {
 				clog.FromContext(gctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
@@ -295,7 +295,7 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string, repoOwner string, repoName string) (*renovateDep, error) {
+func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, rootDir string, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string, repoOwner string, repoName string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -419,7 +419,7 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, file
 	}
 
 	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, repoOwner, repoName,
-		filePath, cfg.Package.Name, result,
+		rootDir, filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,
 		checks, rebaseWhen, bot,
