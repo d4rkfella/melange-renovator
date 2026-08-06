@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -64,32 +65,55 @@ func trimTrailingWhitespace(path string) error {
 func discoverConfigs(
 	ctx context.Context,
 	root string,
-	configPatterns []string,
+	configFilePatterns []string,
 	ignorePaths []string,
 ) ([]discoveredConfig, error) {
 	log := clog.FromContext(ctx)
 
 	var found []discoveredConfig
 
+	var patterns []*regexp.Regexp
+	for _, pattern := range configFilePatterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid config file pattern %q: %w", pattern, err)
+		}
+		patterns = append(patterns, re)
+	}
+
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			log.Warn("Directory walk error", "path", path, "error", err)
+			log.Warn(
+				"directory walk error",
+				"path", path,
+				"error", err,
+			)
 			return nil
 		}
 
 		relPath, err := filepath.Rel(root, path)
 		if err != nil {
-			log.Warn("failed calculating relative path", "path", path, "error", err)
+			log.Warn(
+				"failed calculating relative path",
+				"path", path,
+				"error", err,
+			)
 			return nil
 		}
 
 		if shouldIgnorePath(relPath, ignorePaths) {
 			if d.IsDir() {
-				log.Debug("skipping ignored directory", "path", relPath)
+				log.Debug(
+					"skipping ignored directory",
+					"path", relPath,
+				)
 				return filepath.SkipDir
 			}
 
-			log.Debug("skipping ignored file", "path", relPath)
+			log.Debug(
+				"skipping ignored file",
+				"path", relPath,
+			)
 			return nil
 		}
 
@@ -104,7 +128,7 @@ func discoverConfigs(
 			return nil
 		}
 
-		if !matchesAnyPattern(relPath, configPatterns) {
+		if !matchesConfigPattern(relPath, patterns) {
 			return nil
 		}
 
@@ -126,6 +150,11 @@ func discoverConfigs(
 			return nil
 		}
 
+		log.Debug(
+			"discovered melange config",
+			"path", path,
+		)
+
 		found = append(found, discoveredConfig{
 			Path:   path,
 			Config: cfg,
@@ -137,23 +166,22 @@ func discoverConfigs(
 	return found, err
 }
 
-func matchesAnyPattern(path string, patterns []string) bool {
+func matchesConfigPattern(path string, patterns []*regexp.Regexp) bool {
 	for _, pattern := range patterns {
-		if matched, _ := doublestar.Match(pattern, path); matched {
+		if pattern.MatchString(path) {
 			return true
 		}
 	}
-
 	return false
 }
 
 func shouldIgnorePath(path string, patterns []string) bool {
 	for _, pattern := range patterns {
-		if matched, _ := doublestar.Match(pattern, path); matched {
+		matched, err := doublestar.Match(pattern, path)
+		if err == nil && matched {
 			return true
 		}
 	}
-
 	return false
 }
 
