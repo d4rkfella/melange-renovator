@@ -15,6 +15,23 @@ const dashboardTitle = "Renovate Dashboard"
 
 const prRebaseControl = "\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n"
 
+// Options holds the command-line options for melange-renovator.
+type Options struct {
+	LogLevel           string
+	DryRun             bool
+	Concurrency        int
+	S3Bucket           string
+	AWSRegion          string
+	AWSAccessKey       string
+	AWSSecretKey       string
+	AWSEndpoint        string
+	Token              string
+	RebaseWhen         string
+	Autodiscover       bool
+	AutodiscoverFilter []string
+	BaseDir            string
+}
+
 type packageState struct {
 	LastVersion string    `json:"last_version"`
 	LastChecked time.Time `json:"last_checked"`

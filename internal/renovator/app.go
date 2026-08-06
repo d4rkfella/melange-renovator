@@ -23,21 +23,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Options contains the runtime and transport inputs required to execute the
-// renovation workflow from the command layer.
-type Options struct {
-	LogLevel     string
-	DryRun       bool
-	Concurrency  int
-	S3Bucket     string
-	AWSRegion    string
-	AWSAccessKey string
-	AWSSecretKey string
-	AWSEndpoint  string
-	Token        string
-	RebaseWhen   string
-}
-
 func bumpConfig(ctx context.Context, configPath, newVersion, expectedCommit string) error {
 	if err := trimTrailingWhitespace(configPath); err != nil {
 		return fmt.Errorf("trimming trailing whitespace: %w", err)
@@ -75,16 +60,11 @@ func trimTrailingWhitespace(path string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
-func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
+func discoverConfigs(ctx context.Context, root string) ([]discoveredConfig, error) {
 	log := clog.FromContext(ctx)
 	var found []discoveredConfig
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-
-	err = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			log.Warn("Directory walk error", "path", path, "error", err)
 			return nil
@@ -135,15 +115,90 @@ func discoverConfigs(ctx context.Context) ([]discoveredConfig, error) {
 func RunContext(ctx context.Context, opts Options) {
 	log := clog.FromContext(ctx)
 
-	discoveredConfigs, err := discoverConfigs(ctx)
+	ghClient := github.NewClient(nil).WithAuthToken(opts.Token)
+
+	bot, err := detectBotLogin(ctx, ghClient)
 	if err != nil {
-		log.Error("Melange-renovator failed during auto-discovery", "error", err)
+		log.Error("failed to detect bot identity", "error", err)
 		os.Exit(1)
 	}
 
+	var s3Client *s3.Client
+	if !opts.DryRun {
+		var optFns []func(*awscfg.LoadOptions) error
+		if opts.AWSRegion != "" {
+			optFns = append(optFns, awscfg.WithRegion(opts.AWSRegion))
+		}
+		if opts.AWSAccessKey != "" && opts.AWSSecretKey != "" {
+			creds := credentials.NewStaticCredentialsProvider(opts.AWSAccessKey, opts.AWSSecretKey, "")
+			optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
+		}
+
+		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
+		if err != nil {
+			log.Error("failed to load AWS config", "error", err)
+			os.Exit(1)
+		}
+
+		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+			if opts.AWSEndpoint != "" {
+				o.BaseEndpoint = aws.String(opts.AWSEndpoint)
+			}
+		})
+	}
+
+	if !opts.Autodiscover {
+		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
+		if len(repoParts) != 2 {
+			log.Error("invalid GITHUB_REPOSITORY format, expected owner/repo", "value", os.Getenv("GITHUB_REPOSITORY"))
+			os.Exit(1)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Error("failed to get working directory", "error", err)
+			os.Exit(1)
+		}
+		processRepo(ctx, ghClient, s3Client, repoParts[0], repoParts[1], cwd, opts, bot)
+		return
+	}
+
+	allRepos, err := listInstallationRepos(ctx, ghClient)
+	if err != nil {
+		log.Error("failed to list installation repositories", "error", err)
+		os.Exit(1)
+	}
+
+	matched := filterRepos(allRepos, opts.AutodiscoverFilter)
+	log.Info("Autodiscovered repositories", "count", len(matched))
+
+	for _, repo := range matched {
+		repoLog := log.With("repo", repo.GetFullName())
+
+		dir, err := prepareRepo(ctx, repo, opts.Token, opts.BaseDir)
+		if err != nil {
+			repoLog.Error("failed to prepare repository clone, skipping", "error", err)
+			continue
+		}
+
+		processRepo(clog.WithLogger(ctx, repoLog), ghClient, s3Client,
+			repo.GetOwner().GetLogin(), repo.GetName(), dir, opts, bot)
+	}
+}
+
+// processRepo runs discovery, per-package processing, and the dependency
+// dashboard update for a single repository rooted at rootDir.
+func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
+	log := clog.FromContext(ctx)
+
+	discoveredConfigs, err := discoverConfigs(ctx, rootDir)
+	if err != nil {
+		log.Error("Melange-renovator failed during auto-discovery", "error", err)
+		return
+	}
+
 	if len(discoveredConfigs) == 0 {
-		log.Warn("No valid melange configs were discovered in the current working directory")
-		os.Exit(0)
+		log.Warn("No valid melange configs were discovered")
+		return
 	}
 
 	configPaths := make([]string, len(discoveredConfigs))
@@ -163,68 +218,27 @@ func RunContext(ctx context.Context, opts Options) {
 		Endpoint:  opts.AWSEndpoint,
 	}
 
-	baseCtx := ctx
-	g, ctx := errgroup.WithContext(baseCtx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(opts.Concurrency)
 
-	var successCount atomic.Int64
-	var failureCount atomic.Int64
-
+	var successCount, failureCount atomic.Int64
 	var reportMu sync.Mutex
 	var report []renovatePackageFile
 
 	var dashboardStartBody string
-	var ghClient *github.Client
-	var repoOwner, repoName string
 	var checks dashboardChecks
-
-	ghClient = github.NewClient(nil).WithAuthToken(opts.Token)
-
-	bot, err := detectBotLogin(ctx, ghClient)
-	if err != nil {
-		log.Error("failed to detect bot identity", "error", err)
-		os.Exit(1)
-	}
-
-	var s3Client *s3.Client
-
 	if !opts.DryRun {
-		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
-		if len(repoParts) != 2 {
-			log.Error("invalid GITHUB_REPOSITORY format, expected owner/repo", "value", os.Getenv("GITHUB_REPOSITORY"))
-			os.Exit(1)
-		}
-		repoOwner, repoName = repoParts[0], repoParts[1]
-		_, dashboardStartBody, checks, err = readDashboard(baseCtx, ghClient, repoOwner, repoName)
+		_, dashboardStartBody, checks, err = readDashboard(ctx, ghClient, repoOwner, repoName)
 		if err != nil {
 			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
 		}
-		var optFns []func(*awscfg.LoadOptions) error
-		if awsOpts.Region != "" {
-			optFns = append(optFns, awscfg.WithRegion(awsOpts.Region))
-		}
-		if awsOpts.AccessKey != "" && awsOpts.SecretKey != "" {
-			creds := credentials.NewStaticCredentialsProvider(awsOpts.AccessKey, awsOpts.SecretKey, "")
-			optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
-		}
-
-		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
-		if err != nil {
-			os.Exit(1)
-		}
-
-		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
-			if awsOpts.Endpoint != "" {
-				o.BaseEndpoint = aws.String(awsOpts.Endpoint)
-			}
-		})
 	}
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(ctx, ghClient, s3Client, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot)
+			dep, err := run(gctx, ghClient, s3Client, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot, repoOwner, repoName)
 			if err != nil {
-				clog.FromContext(ctx).Error("error processing melange config", "error", err, "config_path", item.Path)
+				clog.FromContext(gctx).Error("error processing melange config", "error", err, "config_path", item.Path)
 				failureCount.Add(1)
 				if dep == nil {
 					dep = &renovateDep{
@@ -253,17 +267,17 @@ func RunContext(ctx context.Context, opts Options) {
 
 	if err := g.Wait(); err != nil {
 		log.Error("Melange-renovator execution halted due to a fatal error", "error", err)
-		os.Exit(1)
+		return
 	}
 
-	log.Info("Melange-renovator finished processing all discovered config files",
+	log.Info("Melange-renovator finished processing repository",
 		"total", len(discoveredConfigs),
 		"succeeded", successCount.Load(),
 		"failed", failureCount.Load(),
 	)
 
 	if !opts.DryRun {
-		if err := ensureDependencyDashboard(baseCtx, ghClient, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
+		if err := ensureDependencyDashboard(ctx, ghClient, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
 			log.Warn("failed to update dependency dashboard", "error", err)
 		}
 	}
@@ -275,13 +289,13 @@ func RunContext(ctx context.Context, opts Options) {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		log.Error("failed to marshal JSON report", "error", err)
-		os.Exit(1)
+		return
 	}
 
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string) (*renovateDep, error) {
+func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string, repoOwner string, repoName string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -311,7 +325,7 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, file
 		return dep, fmt.Errorf("compiling patterns: %w", err)
 	}
 
-	var stateKey string
+	stateKey := fmt.Sprintf("state/%s/%s/%s.json", repoOwner, repoName, cfg.Package.Name)
 	var pkgState packageState
 
 	if !dryRun {
@@ -404,14 +418,7 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, file
 		return dep, nil
 	}
 
-	repoEnv := os.Getenv("GITHUB_REPOSITORY")
-	parts := strings.Split(repoEnv, "/")
-	if len(parts) != 2 {
-		dep.Warnings = append(dep.Warnings, fmt.Sprintf("invalid GITHUB_REPOSITORY format %q", repoEnv))
-		return dep, fmt.Errorf("invalid GITHUB_REPOSITORY format %q: expected owner/repo", repoEnv)
-	}
-
-	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, parts[0], parts[1],
+	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, repoOwner, repoName,
 		filePath, cfg.Package.Name, result,
 		prBranch, prTitle, prBody,
 		cfg.Update.RequireSequential, dryRun,

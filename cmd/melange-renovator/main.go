@@ -70,7 +70,9 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 			return nil
 		},
 	}
-
+	rootCmd.Flags().Bool("autodiscover", false, "Discover repositories via the GitHub App installation instead of relying on a pre-checked-out repo")
+	rootCmd.Flags().StringSlice("autodiscover-filter", nil, "Glob pattern(s) (owner/repo) to filter autodiscovered repositories")
+	rootCmd.Flags().String("base-dir", "/tmp/renovate", "Base directory for repo clones and cache")
 	rootCmd.Flags().String("log-level", "info", "Log level")
 	rootCmd.Flags().Bool("dry-run", false, "Saves PR metadata to a local file and skips S3-dependent scheduling logic.")
 	rootCmd.Flags().Int("concurrency", 10, "Number of parallel workers")
@@ -126,15 +128,18 @@ func containsWhitespace(s string) bool {
 
 func newOptionsFromViper(v *viper.Viper) renovator.Options {
 	return renovator.Options{
-		LogLevel:     v.GetString("log-level"),
-		DryRun:       v.GetBool("dry-run"),
-		Concurrency:  v.GetInt("concurrency"),
-		S3Bucket:     v.GetString("s3-bucket"),
-		AWSRegion:    v.GetString("aws-region"),
-		AWSAccessKey: v.GetString("aws-access-key"),
-		AWSSecretKey: v.GetString("aws-secret-key"),
-		AWSEndpoint:  v.GetString("aws-endpoint"),
-		Token:        v.GetString("token"),
-		RebaseWhen:   v.GetString("rebase-when"),
+		Autodiscover:       v.GetBool("autodiscover"),
+		AutodiscoverFilter: v.GetStringSlice("autodiscover-filter"),
+		BaseDir:            v.GetString("base-dir"),
+		LogLevel:           v.GetString("log-level"),
+		DryRun:             v.GetBool("dry-run"),
+		Concurrency:        v.GetInt("concurrency"),
+		S3Bucket:           v.GetString("s3-bucket"),
+		AWSRegion:          v.GetString("aws-region"),
+		AWSAccessKey:       v.GetString("aws-access-key"),
+		AWSSecretKey:       v.GetString("aws-secret-key"),
+		AWSEndpoint:        v.GetString("aws-endpoint"),
+		Token:              v.GetString("token"),
+		RebaseWhen:         v.GetString("rebase-when"),
 	}
 }
