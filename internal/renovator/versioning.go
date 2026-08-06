@@ -74,9 +74,6 @@ func resolveLatestVersion(
 		}
 
 		transformed := applyVersionTransforms(upstream, versionHandler, patterns.VersionTransforms)
-		if transformed != upstream {
-			log.Debug("Version transform applied", "upstream", upstream, "transformed", transformed)
-		}
 
 		ver, err := apk.ParseVersion(transformed)
 		if err != nil {

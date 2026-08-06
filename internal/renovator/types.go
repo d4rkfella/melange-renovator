@@ -30,6 +30,8 @@ type Options struct {
 	Autodiscover       bool
 	AutodiscoverFilter []string
 	BaseDir            string
+	ConfigFilePatterns []string
+	IgnorePaths        []string
 }
 
 type packageState struct {

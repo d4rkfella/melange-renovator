@@ -18,6 +18,7 @@ import (
 	awscfg "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v81/github"
 	"golang.org/x/sync/errgroup"
@@ -60,8 +61,14 @@ func trimTrailingWhitespace(path string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
-func discoverConfigs(ctx context.Context, root string) ([]discoveredConfig, error) {
+func discoverConfigs(
+	ctx context.Context,
+	root string,
+	configPatterns []string,
+	ignorePaths []string,
+) ([]discoveredConfig, error) {
 	log := clog.FromContext(ctx)
+
 	var found []discoveredConfig
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -70,31 +77,50 @@ func discoverConfigs(ctx context.Context, root string) ([]discoveredConfig, erro
 			return nil
 		}
 
-		name := d.Name()
+		relPath, err := filepath.Rel(root, path)
+		if err != nil {
+			log.Warn("failed calculating relative path", "path", path, "error", err)
+			return nil
+		}
+
+		if shouldIgnorePath(relPath, ignorePaths) {
+			if d.IsDir() {
+				log.Debug("skipping ignored directory", "path", relPath)
+				return filepath.SkipDir
+			}
+
+			log.Debug("skipping ignored file", "path", relPath)
+			return nil
+		}
 
 		if d.IsDir() {
-			if strings.HasPrefix(name, ".") {
+			if strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		if strings.HasPrefix(name, ".") {
+		if strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
 
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+		if !matchesAnyPattern(relPath, configPatterns) {
 			return nil
 		}
 
 		cfg, err := config.ParseConfiguration(ctx, path)
 		if err != nil {
-			log.Debug("Failed to parse as valid melange configuration", "path", path, "error", err)
+			log.Debug(
+				"failed to parse as valid melange configuration",
+				"path", path,
+				"error", err,
+			)
 			return nil
 		}
 
 		if !cfg.Update.Enabled {
-			log.Debug("Skipping config: updates are disabled/not configured",
+			log.Debug(
+				"skipping config: updates are disabled",
 				"path", path,
 			)
 			return nil
@@ -109,6 +135,26 @@ func discoverConfigs(ctx context.Context, root string) ([]discoveredConfig, erro
 	})
 
 	return found, err
+}
+
+func matchesAnyPattern(path string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if matched, _ := doublestar.Match(pattern, path); matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+func shouldIgnorePath(path string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if matched, _ := doublestar.Match(pattern, path); matched {
+			return true
+		}
+	}
+
+	return false
 }
 
 // RunContext executes the melange-renovator workflow using the typed command options.
@@ -190,7 +236,12 @@ func RunContext(ctx context.Context, opts Options) {
 func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
 	log := clog.FromContext(ctx)
 
-	discoveredConfigs, err := discoverConfigs(ctx, rootDir)
+	discoveredConfigs, err := discoverConfigs(
+		ctx,
+		rootDir,
+		opts.ConfigFilePatterns,
+		opts.IgnorePaths,
+	)
 	if err != nil {
 		log.Error("Melange-renovator failed during auto-discovery", "error", err)
 		return
