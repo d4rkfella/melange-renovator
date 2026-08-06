@@ -1,9 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (example: 1.2.3)"
+        required: true
+        type: string
 
 jobs:
   create-release:
@@ -44,6 +47,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install gitsign
+        run: |
+          go install github.com/sigstore/gitsign@latest
+
+      - name: Configure keyless git signing
+        run: |
+          git config gpg.x509.program gitsign
+          git config gpg.format x509
+          git config tag.gpgsign true
+
+      - name: Create signed annotated tag
+        env:
+          VERSION: v${{ inputs.version }}
+        run: |
+          git tag -s "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
