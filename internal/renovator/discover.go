@@ -224,4 +224,6 @@ func logRepositoryState(log *clog.Logger, r *git.Repository) {
 			"author_email": commit.Author.Email,
 		},
 	)
+
+	log.Debug(fmt.Sprintf("Current branch SHA: %s", head.Hash()))
 }
