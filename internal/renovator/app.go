@@ -236,19 +236,28 @@ func RunContext(ctx context.Context, opts Options) {
 		return
 	}
 
+	log.Debug("Autodiscovering GitHub repositories")
 	allRepos, err := listInstallationRepos(ctx, ghClient)
 	if err != nil {
-		log.Error("failed to list installation repositories", "error", err)
+		log.Error("failed to autodiscover repositories", "error", err)
 		os.Exit(1)
 	}
+	log.Debug("Autodiscovered %d repositories", len(allRepos))
 
+	log.Debug("Applying autodiscoverFilter", "autodiscoverFilter", opts.AutodiscoverFilter)
 	matched := filterRepos(allRepos, opts.AutodiscoverFilter)
-	log.Info("Autodiscovered repositories", "count", len(matched))
+	log.Info("Autodiscovered repositories", "length", len(matched), "repositories", func() []string {
+		names := make([]string, len(matched))
+		for i, r := range matched {
+			names[i] = r.GetFullName()
+		}
+		return names
+	}())
 
 	for _, repo := range matched {
-		repoLog := log.With("repo", repo.GetFullName())
+		repoLog := log.With("repository", repo.GetFullName())
 
-		dir, err := prepareRepo(ctx, repo, opts.Token, opts.BaseDir)
+		dir, err := prepareRepo(clog.WithLogger(ctx, repoLog), repo, opts.Token, opts.BaseDir)
 		if err != nil {
 			repoLog.Error("failed to prepare repository clone, skipping", "error", err)
 			continue

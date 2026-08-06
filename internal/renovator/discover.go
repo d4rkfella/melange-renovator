@@ -20,7 +20,6 @@ import (
 func listInstallationRepos(ctx context.Context, gh *github.Client) ([]*github.Repository, error) {
 	var all []*github.Repository
 	opts := &github.ListOptions{PerPage: 100}
-
 	for {
 		result, resp, err := gh.Apps.ListRepos(ctx, opts)
 		if err != nil {
@@ -33,7 +32,6 @@ func listInstallationRepos(ctx context.Context, gh *github.Client) ([]*github.Re
 		}
 		opts.Page = resp.NextPage
 	}
-
 	return all, nil
 }
 
@@ -60,9 +58,7 @@ func repoLocalDir(baseDir string, repo *github.Repository) string {
 }
 
 func prepareRepo(ctx context.Context, repo *github.Repository, token, baseDir string) (localDir string, err error) {
-	log := clog.FromContext(ctx).With(
-		"repository", repo.GetFullName(),
-	)
+	log := clog.FromContext(ctx)
 
 	localDir = repoLocalDir(baseDir, repo)
 	auth := &githttp.BasicAuth{
@@ -93,14 +89,13 @@ func prepareRepo(ctx context.Context, repo *github.Repository, token, baseDir st
 		)
 
 		_ = os.RemoveAll(localDir)
-	} else {
-		log.Debug("Repository does not exist, creating new shallow clone")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(localDir), 0o755); err != nil {
 		return "", fmt.Errorf("creating repo cache parent dir: %w", err)
 	}
 
+	log.Debug("Performing shallow clone")
 	start := time.Now()
 
 	r, err := git.PlainCloneContext(ctx, localDir, false, &git.CloneOptions{
@@ -193,15 +188,40 @@ func logRepositoryState(log *clog.Logger, r *git.Repository) {
 		return
 	}
 
+	subject := strings.TrimSpace(commit.Message)
+	body := ""
+	if parts := strings.SplitN(commit.Message, "\n\n", 2); len(parts) == 2 {
+		subject = strings.TrimSpace(parts[0])
+		body = strings.TrimSpace(parts[1])
+	}
+
+	var refs []string
+	iter, err := r.References()
+	if err == nil {
+		_ = iter.ForEach(func(ref *plumbing.Reference) error {
+			if ref.Hash() != commit.Hash {
+				return nil
+			}
+
+			name := ref.Name().Short()
+			if ref.Name() == head.Name() {
+				name = "HEAD -> " + name
+			}
+
+			refs = append(refs, name)
+			return nil
+		})
+	}
+
 	log.Debug("latest repository commit",
 		"latestCommit", map[string]any{
 			"hash":         commit.Hash.String(),
 			"date":         commit.Author.When,
-			"message":      strings.TrimSpace(commit.Message),
+			"message":      subject,
+			"body":         body,
+			"refs":         strings.Join(refs, ", "),
 			"author_name":  commit.Author.Name,
 			"author_email": commit.Author.Email,
 		},
 	)
-
-	log.Debug(fmt.Sprintf("Current branch SHA: %s", head.Hash()))
 }
