@@ -2,6 +2,7 @@ package renovator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -213,16 +214,23 @@ func logRepositoryState(log *clog.Logger, r *git.Repository) {
 		})
 	}
 
-	log.Debug("latest repository commit",
-		"latestCommit", map[string]any{
-			"hash":         commit.Hash.String(),
-			"date":         commit.Author.When,
-			"message":      subject,
-			"body":         body,
-			"refs":         strings.Join(refs, ", "),
-			"author_name":  commit.Author.Name,
-			"author_email": commit.Author.Email,
-		},
+	latestCommit := map[string]any{
+		"hash":         commit.Hash.String(),
+		"date":         commit.Author.When,
+		"message":      subject,
+		"refs":         strings.Join(refs, ", "),
+		"body":         body,
+		"author_name":  commit.Author.Name,
+		"author_email": commit.Author.Email,
+	}
+
+	data, err := json.MarshalIndent(latestCommit, "", "  ")
+	if err != nil {
+		return
+	}
+
+	log.Debug(
+		fmt.Sprintf("latest repository commit\n%s", data),
 	)
 
 	log.Debug(fmt.Sprintf("Current branch SHA: %s", head.Hash()))

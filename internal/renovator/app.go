@@ -249,7 +249,9 @@ func RunContext(ctx context.Context, opts Options) {
 		log.Error("failed to autodiscover repositories", "error", err)
 		os.Exit(1)
 	}
-	log.Debug("Autodiscovered %d repositories", len(allRepos))
+	log.Debug(
+		fmt.Sprintf("Autodiscovered %d repositories", len(allRepos)),
+	)
 
 	log.Debug("Applying autodiscoverFilter", "autodiscoverFilter", opts.AutodiscoverFilter)
 	matched := filterRepos(allRepos, opts.AutodiscoverFilter)
@@ -300,10 +302,6 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 	for i, c := range discoveredConfigs {
 		configPaths[i] = c.Path
 	}
-	log.Info("Discovered melange configs with updates enabled",
-		"count", len(discoveredConfigs),
-		"paths", configPaths,
-	)
 
 	awsOpts := awsOptions{
 		Bucket:    opts.S3Bucket,
