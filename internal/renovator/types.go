@@ -31,7 +31,7 @@ type Options struct {
 	AutodiscoverFilter []string
 	BaseDir            string
 	ConfigFilePatterns []string
-	IgnorePaths           []string
+	IgnorePaths        []string
 }
 
 type packageState struct {
@@ -123,7 +123,6 @@ type renovateDep struct {
 	ResolvedTag     string        `json:"resolvedUpstreamTag,omitempty"`
 	ResolvedVersion string        `json:"resolvedTransformedVersion,omitempty"`
 	ResolvedCommit  string        `json:"resolvedCommitSha,omitempty"`
-	FixedVersion    string        `json:"fixedVersion,omitempty"`
 	UpdateAvailable bool          `json:"updateAvailable"`
 	Skipped         bool          `json:"skipped"`
 	SkipReason      string        `json:"skipReason,omitempty"`

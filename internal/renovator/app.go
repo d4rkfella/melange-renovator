@@ -437,7 +437,6 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, root
 			)
 			dep.Skipped = true
 			dep.SkipReason = "not due per schedule"
-			dep.FixedVersion = cfg.Package.Version
 			return dep, nil
 		}
 	}
@@ -478,7 +477,6 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, root
 	}
 
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
-		dep.FixedVersion = cfg.Package.Version
 		dep.UpdateAvailable = false
 		if !dryRun {
 			persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
