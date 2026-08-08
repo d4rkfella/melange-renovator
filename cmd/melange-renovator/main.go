@@ -83,6 +83,7 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 	rootCmd.Flags().String("aws-endpoint", "", "Custom S3 endpoint URL")
 	rootCmd.Flags().String("token", "", "GitHub token for API access")
 	rootCmd.Flags().String("rebase-when", "auto", "Rebase strategy for PRs (options: 'auto', 'behind-base-branch', 'conflicted', 'never')")
+	rootCmd.Flags().String("recreate-when", "auto", "Recreate strategy for closed PRs (options: 'auto', 'always', 'never')")
 	rootCmd.Flags().StringSlice("config-file-patterns", []string{`\.ya?ml$`}, "Regex patterns used to discover melange configuration files")
 	rootCmd.Flags().StringSlice("ignore-paths", nil, "Glob patterns for paths to ignore during discovery")
 
@@ -143,6 +144,7 @@ func newOptionsFromViper(v *viper.Viper) renovator.Options {
 		AWSEndpoint:        v.GetString("aws-endpoint"),
 		Token:              v.GetString("token"),
 		RebaseWhen:         v.GetString("rebase-when"),
+		RecreateWhen:       v.GetString("recreate-when"),
 		ConfigFilePatterns: v.GetStringSlice("config-file-patterns"),
 		IgnorePaths:        v.GetStringSlice("ignore-paths"),
 	}

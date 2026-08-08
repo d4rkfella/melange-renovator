@@ -9,8 +9,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-const reopenThreshold = 7 * 24 * time.Hour
-
 const dashboardTitle = "Renovate Dashboard"
 
 const prRebaseControl = "\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n"
@@ -27,6 +25,7 @@ type Options struct {
 	AWSEndpoint        string
 	Token              string
 	RebaseWhen         string
+	RecreateWhen       string
 	Autodiscover       bool
 	AutodiscoverFilter []string
 	BaseDir            string
@@ -40,13 +39,27 @@ type packageState struct {
 }
 
 type discoveredConfig struct {
-	Path   string
+	File   packageFile
 	Config *config.Configuration
 }
 
-type dashboardChecks struct {
-	RebasePR  map[string]bool
-	RebaseAll bool
+type packageFile struct {
+	Path        string
+	RepoAPIPath string
+}
+
+type runtimeConfig struct {
+	RebaseWhen       string
+	RecreateWhen     string
+	Bot              string
+	DashboardActions dashboardActions
+}
+
+type dashboardActions struct {
+	RebasePR    map[string]bool
+	RebaseAll   bool
+	RecreatePR  map[string]bool
+	RecreateAll bool
 }
 
 type awsOptions struct {
@@ -115,20 +128,22 @@ type scheduleInfo struct {
 }
 
 type renovateDep struct {
-	DepName         string        `json:"depName"`
-	PackageName     string        `json:"packageName"`
-	Monitor         monitorConfig `json:"monitor"`
-	Schedule        *scheduleInfo `json:"schedule,omitempty"`
-	CurrentVersion  string        `json:"currentVersion"`
-	ResolvedTag     string        `json:"resolvedUpstreamTag,omitempty"`
-	ResolvedVersion string        `json:"resolvedTransformedVersion,omitempty"`
-	ResolvedCommit  string        `json:"resolvedCommitSha,omitempty"`
-	UpdateAvailable bool          `json:"updateAvailable"`
-	Skipped         bool          `json:"skipped"`
-	SkipReason      string        `json:"skipReason,omitempty"`
-	PRUrl           string        `json:"prUrl,omitempty"`
-	DryRun          bool          `json:"dryRun,omitempty"`
-	Warnings        []string      `json:"warnings"`
+	DepName           string        `json:"depName"`
+	PackageName       string        `json:"packageName"`
+	Monitor           monitorConfig `json:"monitor"`
+	Schedule          *scheduleInfo `json:"schedule,omitempty"`
+	BlockedByClosedPR bool          `json:"blockedByClosedPR,omitempty"`
+	ClosedPRUrl       string        `json:"closedPRUrl,omitempty"`
+	CurrentVersion    string        `json:"currentVersion"`
+	ResolvedTag       string        `json:"resolvedUpstreamTag,omitempty"`
+	ResolvedVersion   string        `json:"resolvedTransformedVersion,omitempty"`
+	ResolvedCommit    string        `json:"resolvedCommitSha,omitempty"`
+	UpdateAvailable   bool          `json:"updateAvailable"`
+	Skipped           bool          `json:"skipped"`
+	SkipReason        string        `json:"skipReason,omitempty"`
+	PRUrl             string        `json:"prUrl,omitempty"`
+	DryRun            bool          `json:"dryRun,omitempty"`
+	Warnings          []string      `json:"warnings"`
 }
 
 type renovatePackageFile struct {
@@ -138,10 +153,3 @@ type renovatePackageFile struct {
 
 var anyCheckboxRe = regexp.MustCompile(`- \[( |x)] <!-- ([^>]+?) -->`)
 var prRebaseCheckboxRe = regexp.MustCompile(`- \[(?P<box>[xX])] <!-- rebase-check -->`)
-
-func (d dashboardChecks) ShouldForce(pkgName string) bool {
-	if d.RebaseAll {
-		return true
-	}
-	return d.RebasePR[pkgName]
-}

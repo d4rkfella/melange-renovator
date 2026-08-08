@@ -26,35 +26,40 @@ func checkboxLine(marker string, checked bool) string {
 	return fmt.Sprintf(" - [%s] %s", box, mdComment(marker))
 }
 
-func parseDashboardBody(body string) dashboardChecks {
-	checks := dashboardChecks{
-		RebasePR: make(map[string]bool),
+func parseDashboardBody(body string) dashboardActions {
+	actions := dashboardActions{
+		RebasePR:   make(map[string]bool),
+		RecreatePR: make(map[string]bool),
 	}
 
 	for marker := range allCheckedMarkers(body) {
 		switch {
 		case strings.HasPrefix(marker, "rebase-branch="):
-			checks.RebasePR[strings.TrimPrefix(marker, "rebase-branch=")] = true
+			actions.RebasePR[strings.TrimPrefix(marker, "rebase-branch=")] = true
 		case marker == "rebase-all-open-prs":
-			checks.RebaseAll = true
+			actions.RebaseAll = true
+		case strings.HasPrefix(marker, "recreate-branch="):
+			actions.RecreatePR[strings.TrimPrefix(marker, "recreate-branch=")] = true
+		case marker == "recreate-all-closed-prs":
+			actions.RecreateAll = true
 		}
 	}
-	return checks
+	return actions
 }
 
-func readDashboard(ctx context.Context, gh *github.Client, owner, repo string) (issueNumber int, startBody string, checks dashboardChecks, err error) {
-	issues, _, err := gh.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+func (rm *repoManager) readDashboard(ctx context.Context) (issueNumber int, startBody string, checks dashboardActions, err error) {
+	issues, _, err := rm.gh.Issues.ListByRepo(ctx, rm.owner, rm.repo, &github.IssueListByRepoOptions{
 		State: "open",
 	})
 	if err != nil {
-		return 0, "", dashboardChecks{}, fmt.Errorf("listing dashboard issue: %w", err)
+		return 0, "", dashboardActions{}, fmt.Errorf("listing dashboard issue: %w", err)
 	}
 	for _, iss := range issues {
 		if iss.GetTitle() == dashboardTitle {
 			return iss.GetNumber(), iss.GetBody(), parseDashboardBody(iss.GetBody()), nil
 		}
 	}
-	return 0, "", dashboardChecks{}, nil
+	return 0, "", dashboardActions{}, nil
 }
 
 func prBranchName(pkgName string) string {
@@ -78,10 +83,12 @@ func prNumberFromURL(rawURL string) string {
 }
 
 func renderDashboardBody(report []renovatePackageFile) string {
-	var errored, openPRs, upToDate []renovateDep
+	var errored, openPRs, upToDate, blocked []renovateDep
 	for _, pf := range report {
 		for _, d := range pf.Deps {
 			switch {
+			case d.BlockedByClosedPR:
+				blocked = append(blocked, d)
 			case d.Skipped && d.SkipReason != "" && d.SkipReason != "not due per schedule":
 				errored = append(errored, d)
 			case d.PRUrl != "":
@@ -96,6 +103,7 @@ func renderDashboardBody(report []renovatePackageFile) string {
 	}
 	sortByName(errored)
 	sortByName(openPRs)
+	sortByName(blocked)
 	sortByName(upToDate)
 
 	var b strings.Builder
@@ -110,6 +118,25 @@ func renderDashboardBody(report []renovatePackageFile) string {
 		if len(errored) > 1 {
 			b.WriteString(checkboxLine("retry-all-errored-prs", false))
 			b.WriteString(" **Retry all errored updates at once**\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if len(blocked) > 0 {
+		b.WriteString("## Closed/Ignored\n\n")
+		b.WriteString("The following updates are blocked by an existing closed PR. To recreate the PR, check a box below.\n\n")
+		for _, d := range blocked {
+			branch := prBranchName(d.PackageName)
+			b.WriteString(checkboxLine("recreate-branch="+branch, false))
+			if prNum := prNumberFromURL(d.ClosedPRUrl); prNum != "" {
+				fmt.Fprintf(&b, " [%s/%s package update](../pull/%s)\n", d.PackageName, d.ResolvedVersion, prNum)
+			} else {
+				fmt.Fprintf(&b, " `%s/%s package update`\n", d.PackageName, d.ResolvedVersion)
+			}
+		}
+		if len(blocked) > 1 {
+			b.WriteString(checkboxLine("recreate-all-closed-prs", false))
+			b.WriteString(" **Recreate all blocked PRs at once**\n")
 		}
 		b.WriteString("\n")
 	}
@@ -133,7 +160,7 @@ func renderDashboardBody(report []renovatePackageFile) string {
 		b.WriteString("\n")
 	}
 
-	if len(openPRs) == 0 && len(errored) == 0 {
+	if len(openPRs) == 0 && len(errored) == 0 && len(blocked) == 0 {
 		b.WriteString("This repository currently has no open or pending updates.\n\n")
 	}
 
@@ -170,11 +197,12 @@ func renderDashboardBody(report []renovatePackageFile) string {
 	return b.String()
 }
 
-func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, repo string, report []renovatePackageFile, dryRun bool, autoclose bool, startBody string) error {
+func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []renovatePackageFile, autoclose bool, startBody string) error {
 	log := clog.FromContext(ctx)
 
 	hasErrors := false
 	hasOpenPRs := false
+	hasBlocked := false
 	for _, pf := range report {
 		for _, d := range pf.Deps {
 			if d.Skipped && d.SkipReason != "" && d.SkipReason != "not due per schedule" {
@@ -183,10 +211,13 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 			if d.PRUrl != "" {
 				hasOpenPRs = true
 			}
+			if d.BlockedByClosedPR {
+				hasBlocked = true
+			}
 		}
 	}
 
-	issues, _, err := gh.Issues.ListByRepo(ctx, owner, repo, &github.IssueListByRepoOptions{
+	issues, _, err := rm.gh.Issues.ListByRepo(ctx, rm.owner, rm.repo, &github.IssueListByRepoOptions{
 		State: "all",
 	})
 	if err != nil {
@@ -207,14 +238,13 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 			existing = iss
 			continue
 		}
-		if !dryRun {
-			if _, _, cErr := gh.Issues.Edit(ctx, owner, repo, iss.GetNumber(), &github.IssueRequest{
-				State: github.Ptr("closed"),
-			}); cErr != nil {
-				log.Warn("failed to close duplicate dashboard issue", "number", iss.GetNumber(), "error", cErr)
-			}
+		if cErr := rm.mutator.EditIssue(ctx, rm.owner, rm.repo, iss.GetNumber(), &github.IssueRequest{
+			State: github.Ptr("closed"),
+		}); cErr != nil {
+			log.Warn("failed to close duplicate dashboard issue", "number", iss.GetNumber(), "error", cErr)
 		}
 	}
+
 	if existing == nil {
 		for _, iss := range matching {
 			if existing == nil || iss.GetNumber() > existing.GetNumber() {
@@ -223,21 +253,16 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 		}
 	}
 
-	if autoclose && !hasErrors && !hasOpenPRs {
+	if autoclose && !hasErrors && !hasOpenPRs && !hasBlocked {
 		if existing == nil || existing.GetState() == "closed" {
 			return nil
 		}
-		if dryRun {
-			log.Info("DRY RUN: would close Dependency Dashboard issue (autoclose enabled)")
-			return nil
-		}
-		_, _, err := gh.Issues.Edit(ctx, owner, repo, existing.GetNumber(), &github.IssueRequest{
+		return rm.mutator.EditIssue(ctx, rm.owner, rm.repo, existing.GetNumber(), &github.IssueRequest{
 			State: github.Ptr("closed"),
 		})
-		return err
 	}
 
-	if existing == nil && !hasErrors && !hasOpenPRs {
+	if existing == nil && !hasErrors && !hasOpenPRs && !hasBlocked {
 		return nil
 	}
 
@@ -266,25 +291,15 @@ func ensureDependencyDashboard(ctx context.Context, gh *github.Client, owner, re
 
 	body := freshBody
 
-	if dryRun {
-		log.Info("DRY RUN: would create/update Dependency Dashboard issue", "body_preview", truncateString(body, 200))
-		return nil
-	}
-
 	if existing == nil {
-		_, _, err := gh.Issues.Create(ctx, owner, repo, &github.IssueRequest{
-			Title: github.Ptr(dashboardTitle),
-			Body:  github.Ptr(body),
-		})
-		return err
+		return rm.mutator.CreateIssue(ctx, rm.owner, rm.repo, dashboardTitle, body)
 	}
 
 	req := &github.IssueRequest{Body: github.Ptr(body)}
 	if existing.GetState() == "closed" {
 		req.State = github.Ptr("open")
 	}
-	_, _, err = gh.Issues.Edit(ctx, owner, repo, existing.GetNumber(), req)
-	return err
+	return rm.mutator.EditIssue(ctx, rm.owner, rm.repo, existing.GetNumber(), req)
 }
 
 func isRebaseRequested(body string) bool {

@@ -14,14 +14,14 @@ import (
 	"github.com/chainguard-dev/clog"
 )
 
-func persistState(ctx context.Context, s3Client *s3.Client, bucket, stateKey string, pkgState packageState, result versionResult, updated bool) {
+func persistState(ctx context.Context, m mutator, s3Client *s3.Client, bucket, stateKey string, pkgState packageState, result versionResult, updated bool) {
 	log := clog.FromContext(ctx)
 	pkgState.LastChecked = time.Now()
 	if updated {
 		pkgState.LastVersion = result.Version
 	}
 
-	if err := savePackageState(ctx, s3Client, bucket, stateKey, pkgState); err != nil {
+	if err := m.SaveState(ctx, s3Client, bucket, stateKey, pkgState); err != nil {
 		log.Warn("failed to persist package state to S3",
 			"bucket", bucket,
 			"key", stateKey,

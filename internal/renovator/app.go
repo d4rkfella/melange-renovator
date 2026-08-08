@@ -155,7 +155,7 @@ func discoverConfigs(
 		}
 
 		found = append(found, discoveredConfig{
-			Path:   path,
+			File:   packageFile{Path: path, RepoAPIPath: filepath.ToSlash(relPath)},
 			Config: cfg,
 		})
 
@@ -204,29 +204,33 @@ func RunContext(ctx context.Context, opts Options) {
 		os.Exit(1)
 	}
 
-	var s3Client *s3.Client
-	if !opts.DryRun {
-		var optFns []func(*awscfg.LoadOptions) error
-		if opts.AWSRegion != "" {
-			optFns = append(optFns, awscfg.WithRegion(opts.AWSRegion))
-		}
-		if opts.AWSAccessKey != "" && opts.AWSSecretKey != "" {
-			creds := credentials.NewStaticCredentialsProvider(opts.AWSAccessKey, opts.AWSSecretKey, "")
-			optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
-		}
-
-		awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
-		if err != nil {
-			log.Error("failed to load AWS config", "error", err)
-			os.Exit(1)
-		}
-
-		s3Client = s3.NewFromConfig(awsConfig, func(o *s3.Options) {
-			if opts.AWSEndpoint != "" {
-				o.BaseEndpoint = aws.String(opts.AWSEndpoint)
-			}
-		})
+	var m mutator
+	if opts.DryRun {
+		m = newDryRunMutator()
+	} else {
+		m = newLiveMutator(ghClient)
 	}
+
+	var optFns []func(*awscfg.LoadOptions) error
+	if opts.AWSRegion != "" {
+		optFns = append(optFns, awscfg.WithRegion(opts.AWSRegion))
+	}
+	if opts.AWSAccessKey != "" && opts.AWSSecretKey != "" {
+		creds := credentials.NewStaticCredentialsProvider(opts.AWSAccessKey, opts.AWSSecretKey, "")
+		optFns = append(optFns, awscfg.WithCredentialsProvider(creds))
+	}
+
+	awsConfig, err := awscfg.LoadDefaultConfig(ctx, optFns...)
+	if err != nil {
+		log.Error("failed to load AWS config", "error", err)
+		os.Exit(1)
+	}
+
+	s3Client := s3.NewFromConfig(awsConfig, func(o *s3.Options) {
+		if opts.AWSEndpoint != "" {
+			o.BaseEndpoint = aws.String(opts.AWSEndpoint)
+		}
+	})
 
 	if !opts.Autodiscover {
 		repoParts := strings.SplitN(os.Getenv("GITHUB_REPOSITORY"), "/", 2)
@@ -239,7 +243,7 @@ func RunContext(ctx context.Context, opts Options) {
 			log.Error("failed to get working directory", "error", err)
 			os.Exit(1)
 		}
-		processRepo(ctx, ghClient, s3Client, repoParts[0], repoParts[1], cwd, opts, bot)
+		processRepo(ctx, ghClient, m, s3Client, repoParts[0], repoParts[1], cwd, opts, bot)
 		return
 	}
 
@@ -249,9 +253,7 @@ func RunContext(ctx context.Context, opts Options) {
 		log.Error("failed to autodiscover repositories", "error", err)
 		os.Exit(1)
 	}
-	log.Debug(
-		fmt.Sprintf("Autodiscovered %d repositories", len(allRepos)),
-	)
+	log.Debug(fmt.Sprintf("Autodiscovered %d repositories", len(allRepos)))
 
 	log.Debug("Applying autodiscoverFilter", "autodiscoverFilter", opts.AutodiscoverFilter)
 	matched := filterRepos(allRepos, opts.AutodiscoverFilter)
@@ -272,14 +274,14 @@ func RunContext(ctx context.Context, opts Options) {
 			continue
 		}
 
-		processRepo(clog.WithLogger(ctx, repoLog), ghClient, s3Client,
+		processRepo(clog.WithLogger(ctx, repoLog), ghClient, m, s3Client,
 			repo.GetOwner().GetLogin(), repo.GetName(), dir, opts, bot)
 	}
 }
 
 // processRepo runs discovery, per-package processing, and the dependency
 // dashboard update for a single repository rooted at rootDir.
-func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
+func processRepo(ctx context.Context, ghClient *github.Client, m mutator, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
 	log := clog.FromContext(ctx)
 
 	discoveredConfigs, err := discoverConfigs(
@@ -298,11 +300,6 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 		return
 	}
 
-	configPaths := make([]string, len(discoveredConfigs))
-	for i, c := range discoveredConfigs {
-		configPaths[i] = c.Path
-	}
-
 	awsOpts := awsOptions{
 		Bucket:    opts.S3Bucket,
 		Region:    opts.AWSRegion,
@@ -311,6 +308,10 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 		Endpoint:  opts.AWSEndpoint,
 	}
 
+	rm := newRepoManager(ghClient, repoOwner, repoName, m)
+
+	defaultBranch := rm.getDefaultBranch(ctx)
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(opts.Concurrency)
 
@@ -318,20 +319,28 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 	var reportMu sync.Mutex
 	var report []renovatePackageFile
 
-	var dashboardStartBody string
-	var checks dashboardChecks
-	if !opts.DryRun {
-		_, dashboardStartBody, checks, err = readDashboard(ctx, ghClient, repoOwner, repoName)
-		if err != nil {
-			log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
-		}
+	_, dashboardStartBody, checks, err := rm.readDashboard(ctx)
+	if err != nil {
+		log.Warn("failed to read dependency dashboard, proceeding without forced actions", "error", err)
+	}
+
+	runCfg := runtimeConfig{
+		RecreateWhen: opts.RecreateWhen,
+		RebaseWhen:   opts.RebaseWhen,
+		Bot:          bot,
+		DashboardActions: dashboardActions{
+			RebasePR:    checks.RebasePR,
+			RebaseAll:   checks.RebaseAll,
+			RecreatePR:  checks.RecreatePR,
+			RecreateAll: checks.RecreateAll,
+		},
 	}
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := run(gctx, ghClient, s3Client, rootDir, item.Path, item.Config, opts.DryRun, awsOpts, checks, opts.RebaseWhen, bot, repoOwner, repoName)
+			dep, err := processConfig(gctx, ghClient, rm, s3Client, item.File, item.Config, opts.DryRun, awsOpts, runCfg, repoOwner, repoName, defaultBranch)
 			if err != nil {
-				clog.FromContext(gctx).Error("error processing melange config", "error", err, "config_path", item.Path)
+				clog.FromContext(gctx).Error("error processing melange config", "error", err, "config_path", item.File.Path)
 				failureCount.Add(1)
 				if dep == nil {
 					dep = &renovateDep{
@@ -349,7 +358,7 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 
 			reportMu.Lock()
 			report = append(report, renovatePackageFile{
-				PackageFile: item.Path,
+				PackageFile: item.File.RepoAPIPath,
 				Deps:        []renovateDep{*dep},
 			})
 			reportMu.Unlock()
@@ -369,10 +378,8 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 		"failed", failureCount.Load(),
 	)
 
-	if !opts.DryRun {
-		if err := ensureDependencyDashboard(ctx, ghClient, repoOwner, repoName, report, opts.DryRun, false, dashboardStartBody); err != nil {
-			log.Warn("failed to update dependency dashboard", "error", err)
-		}
+	if err := rm.ensureDependencyDashboard(ctx, report, false, dashboardStartBody); err != nil {
+		log.Warn("failed to update dependency dashboard", "error", err)
 	}
 
 	sort.Slice(report, func(i, j int) bool {
@@ -388,11 +395,11 @@ func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Clie
 	fmt.Println(string(data))
 }
 
-func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, rootDir string, filePath string, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, checks dashboardChecks, rebaseWhen string, bot string, repoOwner string, repoName string) (*renovateDep, error) {
+func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager, s3Client *s3.Client, file packageFile, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, runCfg runtimeConfig, repoOwner string, repoName string, defaultBranch string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
-		"config_path", filePath,
+		"config_path", file.RepoAPIPath,
 	))
 	log := clog.FromContext(ctx)
 
@@ -419,26 +426,23 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, root
 	}
 
 	stateKey := fmt.Sprintf("state/%s/%s/%s.json", repoOwner, repoName, cfg.Package.Name)
-	var pkgState packageState
 
-	if !dryRun {
-		pkgState, err = loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
-		if err != nil {
-			dep.Skipped = true
-			dep.SkipReason = err.Error()
-			return dep, fmt.Errorf("loading package state from S3: %w", err)
-		}
+	pkgState, err := loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
+	if err != nil {
+		dep.Skipped = true
+		dep.SkipReason = err.Error()
+		return dep, fmt.Errorf("loading package state from S3: %w", err)
+	}
 
-		if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
-			log.Debug("Skipping config: not due per schedule",
-				"schedule", cfg.Update.Schedule,
-				"schedule_reason", cfg.Update.Schedule.Reason,
-				"last_checked", pkgState.LastChecked,
-			)
-			dep.Skipped = true
-			dep.SkipReason = "not due per schedule"
-			return dep, nil
-		}
+	if !shouldRunSchedule(cfg.Update.Schedule, pkgState.LastChecked) {
+		log.Debug("Skipping config: not due per schedule",
+			"schedule", cfg.Update.Schedule,
+			"schedule_reason", cfg.Update.Schedule.Reason,
+			"last_checked", pkgState.LastChecked,
+		)
+		dep.Skipped = true
+		dep.SkipReason = "not due per schedule"
+		return dep, nil
 	}
 
 	var result versionResult
@@ -478,58 +482,33 @@ func run(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, root
 
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
 		dep.UpdateAvailable = false
-		if !dryRun {
-			persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
-		}
+		persistState(ctx, rm.mutator, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
 		return dep, nil
 	}
 
 	dep.UpdateAvailable = true
 
-	prBranch := fmt.Sprintf("update-%s", cfg.Package.Name)
-	prTitle := fmt.Sprintf("%s/%s package update", cfg.Package.Name, result.Version)
-	prBody := "<p align=\"center\">\n" +
-		"  <img src=\"https://raw.githubusercontent.com/wolfi-dev/.github/b535a42419ce0edb3c144c0edcff55a62b8ec1f8/profile/wolfi-logo-light-mode.svg\" />\n" +
-		"</p>" + prRebaseControl
-
-	if err := bumpConfig(ctx, filePath, result.Version, result.CommitSHA); err != nil {
+	if err := bumpConfig(ctx, file.Path, result.Version, result.CommitSHA); err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
 		return dep, fmt.Errorf("bumping config: %w", err)
 	}
 
-	if dryRun {
-		dryRunPath := filePath + ".dry-run"
-		content := fmt.Sprintf("BRANCH: %s\nTITLE: %s\nBODY: %s\n", prBranch, prTitle, prBody)
-		if err := os.WriteFile(dryRunPath, []byte(content), 0644); err != nil {
-			log.Warn("Failed to write dry-run artifact", "path", dryRunPath, "error", err)
-			dep.Warnings = append(dep.Warnings, fmt.Sprintf("failed to write dry-run artifact: %v", err))
-		} else {
-			log.Info("DRY RUN: wrote PR metadata to disk", "path", dryRunPath)
-		}
-		return dep, nil
-	}
-
-	prURL, closedSuperseded, err := ensurePR(ctx, ghClient, repoOwner, repoName,
-		rootDir, filePath, cfg.Package.Name, result,
-		prBranch, prTitle, prBody,
-		cfg.Update.RequireSequential, dryRun,
-		checks, rebaseWhen, bot,
-	)
+	outcome, err := rm.ensurePR(ctx, file, cfg.Package.Name, result, cfg.Update.RequireSequential, runCfg, defaultBranch)
 	if err != nil {
 		dep.Warnings = append(dep.Warnings, err.Error())
 		return dep, err
 	}
-	dep.PRUrl = prURL
-	if len(closedSuperseded) > 0 {
-		numbers := make([]string, len(closedSuperseded))
-		for i, n := range closedSuperseded {
+	dep.PRUrl = outcome.URL
+	dep.BlockedByClosedPR = outcome.BlockedByClosedPR
+	dep.ClosedPRUrl = outcome.ClosedPRUrl
+	if len(outcome.ClosedSuperseded) > 0 {
+		numbers := make([]string, len(outcome.ClosedSuperseded))
+		for i, n := range outcome.ClosedSuperseded {
 			numbers[i] = fmt.Sprintf("#%d", n)
 		}
 		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
 			"closed superseded PR(s) %s in favor of this update", strings.Join(numbers, ", ")))
 	}
-	if !dryRun {
-		persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
-	}
+	persistState(ctx, rm.mutator, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
 	return dep, nil
 }
