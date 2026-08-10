@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"github.com/chainguard-dev/clog"
@@ -22,18 +24,21 @@ var (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	v := viper.New()
 	v.SetEnvPrefix("RENOVATE")
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	rootCmd := newRootCommand(v)
+	rootCmd := newRootCommand(ctx, v)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func newRootCommand(v *viper.Viper) *cobra.Command {
+func newRootCommand(ctx context.Context, v *viper.Viper) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "melange-renovator",
 		Short:         "Discover and update melange package configs.",
@@ -47,7 +52,7 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 			}
 
 			logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
-			ctx := clog.WithLogger(context.Background(), logger)
+			ctx := clog.WithLogger(ctx, logger)
 			log := clog.FromContext(ctx)
 
 			log.Info("Starting melange-renovator",
@@ -94,6 +99,7 @@ func newRootCommand(v *viper.Viper) *cobra.Command {
 	return rootCmd
 }
 
+// TokenValidationError is a custom error type for token validation errors.
 type TokenValidationError struct {
 	Message string
 }

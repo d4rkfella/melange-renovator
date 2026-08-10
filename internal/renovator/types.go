@@ -128,22 +128,21 @@ type scheduleInfo struct {
 }
 
 type renovateDep struct {
-	DepName           string        `json:"depName"`
-	PackageName       string        `json:"packageName"`
-	Monitor           monitorConfig `json:"monitor"`
-	Schedule          *scheduleInfo `json:"schedule,omitempty"`
-	BlockedByClosedPR bool          `json:"blockedByClosedPR,omitempty"`
-	ClosedPRUrl       string        `json:"closedPRUrl,omitempty"`
-	CurrentVersion    string        `json:"currentVersion"`
-	ResolvedTag       string        `json:"resolvedUpstreamTag,omitempty"`
-	ResolvedVersion   string        `json:"resolvedTransformedVersion,omitempty"`
-	ResolvedCommit    string        `json:"resolvedCommitSha,omitempty"`
-	UpdateAvailable   bool          `json:"updateAvailable"`
-	Skipped           bool          `json:"skipped"`
-	SkipReason        string        `json:"skipReason,omitempty"`
-	PRUrl             string        `json:"prUrl,omitempty"`
-	DryRun            bool          `json:"dryRun,omitempty"`
-	Warnings          []string      `json:"warnings"`
+	DepName         string        `json:"depName"`
+	PackageName     string        `json:"packageName"`
+	Monitor         monitorConfig `json:"monitor"`
+	Schedule        *scheduleInfo `json:"schedule,omitempty"`
+	ClosedPRUrl     string        `json:"closedPrUrl,omitempty"`
+	CurrentVersion  string        `json:"currentVersion"`
+	ResolvedTag     string        `json:"resolvedUpstreamTag,omitempty"`
+	ResolvedVersion string        `json:"resolvedTransformedVersion,omitempty"`
+	ResolvedCommit  string        `json:"resolvedCommitSha,omitempty"`
+	UpdateAvailable bool          `json:"updateAvailable"`
+	Skipped         bool          `json:"skipped"`
+	SkipReason      string        `json:"skipReason,omitempty"`
+	PRUrl           string        `json:"prUrl,omitempty"`
+	DryRun          bool          `json:"dryRun,omitempty"`
+	Warnings        []string      `json:"warnings"`
 }
 
 type renovatePackageFile struct {

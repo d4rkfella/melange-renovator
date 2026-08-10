@@ -6,29 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/chainguard-dev/clog"
 )
-
-func persistState(ctx context.Context, m mutator, s3Client *s3.Client, bucket, stateKey string, pkgState packageState, result versionResult, updated bool) {
-	log := clog.FromContext(ctx)
-	pkgState.LastChecked = time.Now()
-	if updated {
-		pkgState.LastVersion = result.Version
-	}
-
-	if err := m.SaveState(ctx, s3Client, bucket, stateKey, pkgState); err != nil {
-		log.Warn("failed to persist package state to S3",
-			"bucket", bucket,
-			"key", stateKey,
-			"error", err,
-		)
-	}
-}
 
 func loadPackageState(ctx context.Context, client *s3.Client, bucket, key string) (packageState, error) {
 	log := clog.FromContext(ctx)

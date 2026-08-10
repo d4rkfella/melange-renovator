@@ -47,21 +47,6 @@ func parseDashboardBody(body string) dashboardActions {
 	return actions
 }
 
-func (rm *repoManager) readDashboard(ctx context.Context) (issueNumber int, startBody string, checks dashboardActions, err error) {
-	issues, _, err := rm.gh.Issues.ListByRepo(ctx, rm.owner, rm.repo, &github.IssueListByRepoOptions{
-		State: "open",
-	})
-	if err != nil {
-		return 0, "", dashboardActions{}, fmt.Errorf("listing dashboard issue: %w", err)
-	}
-	for _, iss := range issues {
-		if iss.GetTitle() == dashboardTitle {
-			return iss.GetNumber(), iss.GetBody(), parseDashboardBody(iss.GetBody()), nil
-		}
-	}
-	return 0, "", dashboardActions{}, nil
-}
-
 func prBranchName(pkgName string) string {
 	return "update-" + pkgName
 }
@@ -87,7 +72,7 @@ func renderDashboardBody(report []renovatePackageFile) string {
 	for _, pf := range report {
 		for _, d := range pf.Deps {
 			switch {
-			case d.BlockedByClosedPR:
+			case d.ClosedPRUrl != "":
 				blocked = append(blocked, d)
 			case d.Skipped && d.SkipReason != "" && d.SkipReason != "not due per schedule":
 				errored = append(errored, d)
@@ -197,6 +182,21 @@ func renderDashboardBody(report []renovatePackageFile) string {
 	return b.String()
 }
 
+func (rm *repoManager) readDashboard(ctx context.Context) (issueNumber int, startBody string, checks dashboardActions, err error) {
+	issues, _, err := rm.gh.Issues.ListByRepo(ctx, rm.owner, rm.repo, &github.IssueListByRepoOptions{
+		State: "open",
+	})
+	if err != nil {
+		return 0, "", dashboardActions{}, fmt.Errorf("listing dashboard issue: %w", err)
+	}
+	for _, iss := range issues {
+		if iss.GetTitle() == dashboardTitle {
+			return iss.GetNumber(), iss.GetBody(), parseDashboardBody(iss.GetBody()), nil
+		}
+	}
+	return 0, "", dashboardActions{}, nil
+}
+
 func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []renovatePackageFile, autoclose bool, startBody string) error {
 	log := clog.FromContext(ctx)
 
@@ -211,7 +211,7 @@ func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []r
 			if d.PRUrl != "" {
 				hasOpenPRs = true
 			}
-			if d.BlockedByClosedPR {
+			if d.ClosedPRUrl != "" {
 				hasBlocked = true
 			}
 		}
@@ -238,13 +238,12 @@ func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []r
 			existing = iss
 			continue
 		}
-		if cErr := rm.mutator.EditIssue(ctx, rm.owner, rm.repo, iss.GetNumber(), &github.IssueRequest{
+		if cErr := rm.editIssue(ctx, iss.GetNumber(), &github.IssueRequest{
 			State: github.Ptr("closed"),
 		}); cErr != nil {
 			log.Warn("failed to close duplicate dashboard issue", "number", iss.GetNumber(), "error", cErr)
 		}
 	}
-
 	if existing == nil {
 		for _, iss := range matching {
 			if existing == nil || iss.GetNumber() > existing.GetNumber() {
@@ -257,7 +256,7 @@ func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []r
 		if existing == nil || existing.GetState() == "closed" {
 			return nil
 		}
-		return rm.mutator.EditIssue(ctx, rm.owner, rm.repo, existing.GetNumber(), &github.IssueRequest{
+		return rm.editIssue(ctx, existing.GetNumber(), &github.IssueRequest{
 			State: github.Ptr("closed"),
 		})
 	}
@@ -292,14 +291,14 @@ func (rm *repoManager) ensureDependencyDashboard(ctx context.Context, report []r
 	body := freshBody
 
 	if existing == nil {
-		return rm.mutator.CreateIssue(ctx, rm.owner, rm.repo, dashboardTitle, body)
+		return rm.createIssue(ctx, dashboardTitle, body)
 	}
 
 	req := &github.IssueRequest{Body: github.Ptr(body)}
 	if existing.GetState() == "closed" {
 		req.State = github.Ptr("open")
 	}
-	return rm.mutator.EditIssue(ctx, rm.owner, rm.repo, existing.GetNumber(), req)
+	return rm.editIssue(ctx, existing.GetNumber(), req)
 }
 
 func isRebaseRequested(body string) bool {

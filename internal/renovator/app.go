@@ -204,13 +204,6 @@ func RunContext(ctx context.Context, opts Options) {
 		os.Exit(1)
 	}
 
-	var m mutator
-	if opts.DryRun {
-		m = newDryRunMutator()
-	} else {
-		m = newLiveMutator(ghClient)
-	}
-
 	var optFns []func(*awscfg.LoadOptions) error
 	if opts.AWSRegion != "" {
 		optFns = append(optFns, awscfg.WithRegion(opts.AWSRegion))
@@ -243,7 +236,7 @@ func RunContext(ctx context.Context, opts Options) {
 			log.Error("failed to get working directory", "error", err)
 			os.Exit(1)
 		}
-		processRepo(ctx, ghClient, m, s3Client, repoParts[0], repoParts[1], cwd, opts, bot)
+		processRepo(ctx, ghClient, s3Client, repoParts[0], repoParts[1], cwd, opts, bot)
 		return
 	}
 
@@ -266,6 +259,10 @@ func RunContext(ctx context.Context, opts Options) {
 	}())
 
 	for _, repo := range matched {
+		if ctx.Err() != nil {
+			log.Warn("context cancelled", "error", ctx.Err())
+			break
+		}
 		repoLog := log.With("repository", repo.GetFullName())
 
 		dir, err := prepareRepo(clog.WithLogger(ctx, repoLog), repo, opts.Token, opts.BaseDir)
@@ -274,14 +271,12 @@ func RunContext(ctx context.Context, opts Options) {
 			continue
 		}
 
-		processRepo(clog.WithLogger(ctx, repoLog), ghClient, m, s3Client,
+		processRepo(clog.WithLogger(ctx, repoLog), ghClient, s3Client,
 			repo.GetOwner().GetLogin(), repo.GetName(), dir, opts, bot)
 	}
 }
 
-// processRepo runs discovery, per-package processing, and the dependency
-// dashboard update for a single repository rooted at rootDir.
-func processRepo(ctx context.Context, ghClient *github.Client, m mutator, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
+func processRepo(ctx context.Context, ghClient *github.Client, s3Client *s3.Client, repoOwner, repoName, rootDir string, opts Options, bot string) {
 	log := clog.FromContext(ctx)
 
 	discoveredConfigs, err := discoverConfigs(
@@ -308,7 +303,7 @@ func processRepo(ctx context.Context, ghClient *github.Client, m mutator, s3Clie
 		Endpoint:  opts.AWSEndpoint,
 	}
 
-	rm := newRepoManager(ghClient, repoOwner, repoName, m)
+	rm := newRepoManager(ghClient, repoOwner, repoName, opts.DryRun)
 
 	defaultBranch := rm.getDefaultBranch(ctx)
 
@@ -325,20 +320,15 @@ func processRepo(ctx context.Context, ghClient *github.Client, m mutator, s3Clie
 	}
 
 	runCfg := runtimeConfig{
-		RecreateWhen: opts.RecreateWhen,
-		RebaseWhen:   opts.RebaseWhen,
-		Bot:          bot,
-		DashboardActions: dashboardActions{
-			RebasePR:    checks.RebasePR,
-			RebaseAll:   checks.RebaseAll,
-			RecreatePR:  checks.RecreatePR,
-			RecreateAll: checks.RecreateAll,
-		},
+		RebaseWhen:       opts.RebaseWhen,
+		RecreateWhen:     opts.RecreateWhen,
+		Bot:              bot,
+		DashboardActions: checks,
 	}
 
 	for _, item := range discoveredConfigs {
 		g.Go(func() error {
-			dep, err := processConfig(gctx, ghClient, rm, s3Client, item.File, item.Config, opts.DryRun, awsOpts, runCfg, repoOwner, repoName, defaultBranch)
+			dep, err := processConfig(gctx, ghClient, rm, s3Client, item.File, item.Config, opts.DryRun, awsOpts, runCfg, defaultBranch)
 			if err != nil {
 				clog.FromContext(gctx).Error("error processing melange config", "error", err, "config_path", item.File.Path)
 				failureCount.Add(1)
@@ -395,7 +385,7 @@ func processRepo(ctx context.Context, ghClient *github.Client, m mutator, s3Clie
 	fmt.Println(string(data))
 }
 
-func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager, s3Client *s3.Client, file packageFile, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, runCfg runtimeConfig, repoOwner string, repoName string, defaultBranch string) (*renovateDep, error) {
+func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager, s3Client *s3.Client, file packageFile, cfg *config.Configuration, dryRun bool, awsOpts awsOptions, runCfg runtimeConfig, defaultBranch string) (*renovateDep, error) {
 	ctx = clog.WithLogger(ctx, clog.FromContext(ctx).With(
 		"package_name", cfg.Package.Name,
 		"current_version", cfg.Package.Version,
@@ -425,7 +415,7 @@ func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager
 		return dep, fmt.Errorf("compiling patterns: %w", err)
 	}
 
-	stateKey := fmt.Sprintf("state/%s/%s/%s.json", repoOwner, repoName, cfg.Package.Name)
+	stateKey := fmt.Sprintf("state/%s/%s/%s.json", rm.owner, rm.repo, cfg.Package.Name)
 
 	pkgState, err := loadPackageState(ctx, s3Client, awsOpts.Bucket, stateKey)
 	if err != nil {
@@ -482,7 +472,7 @@ func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager
 
 	if compareVersions(ctx, cfg.Package.Version, result.Version) >= 0 {
 		dep.UpdateAvailable = false
-		persistState(ctx, rm.mutator, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
+		rm.persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, false)
 		return dep, nil
 	}
 
@@ -498,17 +488,16 @@ func processConfig(ctx context.Context, ghClient *github.Client, rm *repoManager
 		dep.Warnings = append(dep.Warnings, err.Error())
 		return dep, err
 	}
-	dep.PRUrl = outcome.URL
-	dep.BlockedByClosedPR = outcome.BlockedByClosedPR
-	dep.ClosedPRUrl = outcome.ClosedPRUrl
-	if len(outcome.ClosedSuperseded) > 0 {
-		numbers := make([]string, len(outcome.ClosedSuperseded))
-		for i, n := range outcome.ClosedSuperseded {
+	dep.PRUrl = outcome.PRURL
+	dep.ClosedPRUrl = outcome.BlockedPRURL
+	if len(outcome.SupersededPRs) > 0 {
+		numbers := make([]string, len(outcome.SupersededPRs))
+		for i, n := range outcome.SupersededPRs {
 			numbers[i] = fmt.Sprintf("#%d", n)
 		}
 		dep.Warnings = append(dep.Warnings, fmt.Sprintf(
 			"closed superseded PR(s) %s in favor of this update", strings.Join(numbers, ", ")))
 	}
-	persistState(ctx, rm.mutator, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
+	rm.persistState(ctx, s3Client, awsOpts.Bucket, stateKey, pkgState, result, true)
 	return dep, nil
 }

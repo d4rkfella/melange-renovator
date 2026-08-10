@@ -9,6 +9,10 @@ import (
 	"github.com/google/go-github/v81/github"
 )
 
+func repoFullName(owner, repo string) string {
+	return owner + "/" + repo
+}
+
 type mutator interface {
 	CommitFile(ctx context.Context, owner, repo, branch, parentSHA string, branchExists bool, path string, content []byte, message string) (sha string, err error)
 	CreatePullRequest(ctx context.Context, owner, repo, head, base, title, body string) (*github.PullRequest, error)
@@ -26,14 +30,13 @@ type liveMutator struct{ gh *github.Client }
 func newLiveMutator(gh *github.Client) *liveMutator { return &liveMutator{gh: gh} }
 
 func (m *liveMutator) CommitFile(ctx context.Context, owner, repo, branch, parentSHA string, branchExists bool, path string, content []byte, message string) (string, error) {
-	log := clog.FromContext(ctx)
 	parentCommit, _, err := m.gh.Git.GetCommit(ctx, owner, repo, parentSHA)
 	if err != nil {
 		return "", fmt.Errorf("getting parent commit %s: %w", parentSHA, err)
 	}
 	baseTreeSHA := parentCommit.GetTree().GetSHA()
 
-	newTree, response, err := m.gh.Git.CreateTree(ctx, owner, repo, baseTreeSHA, []*github.TreeEntry{
+	newTree, _, err := m.gh.Git.CreateTree(ctx, owner, repo, baseTreeSHA, []*github.TreeEntry{
 		{
 			Path:    new(path),
 			Mode:    new("100644"),
@@ -42,9 +45,8 @@ func (m *liveMutator) CommitFile(ctx context.Context, owner, repo, branch, paren
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("creating new commit tree: %w", err)
+		return "", fmt.Errorf("creating tree: %w", err)
 	}
-	log.Debug("Successfully created new commit tree", "tree_sha", newTree.GetSHA(), "response_status", response.Status)
 
 	newCommit, _, err := m.gh.Git.CreateCommit(ctx, owner, repo, github.Commit{
 		Message: new(message),
@@ -134,46 +136,46 @@ func newDryRunMutator() *dryRunMutator { return &dryRunMutator{} }
 
 func (m *dryRunMutator) CommitFile(ctx context.Context, owner, repo, branch, parentSHA string, branchExists bool, path string, content []byte, message string) (string, error) {
 	clog.FromContext(ctx).Info("DRY RUN: would commit file",
-		"repo", owner+"/"+repo, "branch", branch, "path", path, "message", message)
+		"repo", repoFullName(owner, repo), "branch", branch, "path", path, "message", message)
 	return "dry-run-sha", nil
 }
 
 func (m *dryRunMutator) CreatePullRequest(ctx context.Context, owner, repo, head, base, title, body string) (*github.PullRequest, error) {
 	clog.FromContext(ctx).Info("DRY RUN: would create PR",
-		"repo", owner+"/"+repo, "head", head, "base", base, "title", title)
+		"repo", repoFullName(owner, repo), "head", head, "base", base, "title", title)
 	return &github.PullRequest{
 		Number:  github.Ptr(0),
-		HTMLURL: github.Ptr(fmt.Sprintf("https://github.com/%s/%s/pull/dry-run-%s", owner, repo, head)),
+		HTMLURL: github.Ptr(fmt.Sprintf("https://github.com/%s/pull/dry-run-%s", repoFullName(owner, repo), head)),
 	}, nil
 }
 
 func (m *dryRunMutator) EditPullRequest(ctx context.Context, owner, repo string, number int, edit *github.PullRequest) error {
-	clog.FromContext(ctx).Info("DRY RUN: would edit PR", "repo", owner+"/"+repo, "pr", number)
+	clog.FromContext(ctx).Info("DRY RUN: would edit PR", "repo", repoFullName(owner, repo), "pr", number)
 	return nil
 }
 
 func (m *dryRunMutator) AddLabels(ctx context.Context, owner, repo string, number int, labels []string) error {
-	clog.FromContext(ctx).Info("DRY RUN: would add labels", "repo", owner+"/"+repo, "pr", number, "labels", labels)
+	clog.FromContext(ctx).Info("DRY RUN: would add labels", "repo", repoFullName(owner, repo), "pr", number, "labels", labels)
 	return nil
 }
 
 func (m *dryRunMutator) CreateIssueComment(ctx context.Context, owner, repo string, number int, body string) error {
-	clog.FromContext(ctx).Info("DRY RUN: would comment", "repo", owner+"/"+repo, "number", number, "body_preview", truncateString(body, 200))
+	clog.FromContext(ctx).Info("DRY RUN: would comment", "repo", repoFullName(owner, repo), "number", number, "body_preview", truncateString(body, 200))
 	return nil
 }
 
 func (m *dryRunMutator) DeleteRef(ctx context.Context, owner, repo, ref string) error {
-	clog.FromContext(ctx).Info("DRY RUN: would delete ref", "repo", owner+"/"+repo, "ref", ref)
+	clog.FromContext(ctx).Info("DRY RUN: would delete ref", "repo", repoFullName(owner, repo), "ref", ref)
 	return nil
 }
 
 func (m *dryRunMutator) CreateIssue(ctx context.Context, owner, repo, title, body string) error {
-	clog.FromContext(ctx).Info("DRY RUN: would create issue", "repo", owner+"/"+repo, "title", title, "body_preview", truncateString(body, 200))
+	clog.FromContext(ctx).Info("DRY RUN: would create issue", "repo", repoFullName(owner, repo), "title", title, "body_preview", truncateString(body, 200))
 	return nil
 }
 
 func (m *dryRunMutator) EditIssue(ctx context.Context, owner, repo string, number int, edit *github.IssueRequest) error {
-	clog.FromContext(ctx).Info("DRY RUN: would edit issue", "repo", owner+"/"+repo, "number", number)
+	clog.FromContext(ctx).Info("DRY RUN: would edit issue", "repo", repoFullName(owner, repo), "number", number)
 	return nil
 }
 
