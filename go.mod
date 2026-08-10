@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	chainguard.dev/apko v1.2.35
-	chainguard.dev/melange v0.57.0
+	chainguard.dev/melange v0.58.0
 	github.com/aws/aws-sdk-go-v2 v1.43.4
 	github.com/aws/aws-sdk-go-v2/config v1.32.35
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.34
