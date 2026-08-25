@@ -1,5 +1,5 @@
-chainguard.dev/apko v1.2.39 h1:yVD1Yror3KtDD5us01J3SrWYdfbgFOr55e+fu/EgzX0=
-chainguard.dev/apko v1.2.39/go.mod h1:ZSS+7I653ZCbKQ/+0MF3+IEbL5XOyTL7GpOUdRGbBjY=
+chainguard.dev/apko v1.2.40 h1:GxcCsN+CbBYKlTwPpEA+3AWh+3ertp6LxS8eXaLrCnw=
+chainguard.dev/apko v1.2.40/go.mod h1:ZSS+7I653ZCbKQ/+0MF3+IEbL5XOyTL7GpOUdRGbBjY=
 chainguard.dev/go-grpc-kit v0.18.0 h1:kr451ml4eBgNcc0ytqcSSPZ3KGtyfHRrrBcYxW/oZwI=
 chainguard.dev/go-grpc-kit v0.18.0/go.mod h1:N1ZZiV3KkNHFlIS6RPhLT9ppfObC7aa1hqWMPmNiTA0=
 chainguard.dev/melange v0.59.2 h1:9KADLOfba0636rpQjU43XDnD1A39YWqsF5cBu2TR9RU=
@@ -59,8 +59,8 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.7 h1:WWkehGZ4nWtOKLMy0yi8+Rqz
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.7/go.mod h1:T8AI4SbQYm9ybcVmki2T3n7Qg1g3kfWoeQlNwNYOyO8=
 github.com/aws/aws-sdk-go-v2/service/sts v1.45.7 h1:yU/9y2r7s9kSUPbHXbpQTa4LA8kt+CMgpu1OBrhx8p4=
 github.com/aws/aws-sdk-go-v2/service/sts v1.45.7/go.mod h1:0lQTDEBArMevQXpxu443LVGjKxxEeSsSnrw9n8YiTMg=
-github.com/aws/smithy-go v1.27.8 h1:FR0dxZfIlV7Z8eh2iHfIofdunw382XsDV3Mxt9nUvRY=
-github.com/aws/smithy-go v1.27.8/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
+github.com/aws/smithy-go v1.27.9 h1:flT/ACSU1ksz3V+8wj8kN8DOB9tsc/ggWPTJXIieRpw=
+github.com/aws/smithy-go v1.27.9/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/bmatcuk/doublestar/v4 v4.10.0 h1:zU9WiOla1YA122oLM6i4EXvGW62DvKZVxIe6TYWexEs=
