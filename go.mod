@@ -3,7 +3,7 @@ module github.com/d4rkfella/melange-renovator
 go 1.27.0
 
 require (
-	chainguard.dev/apko v1.2.41
+	chainguard.dev/apko v1.2.42
 	chainguard.dev/melange v0.59.3
 	github.com/aws/aws-sdk-go-v2 v1.45.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.1
@@ -24,7 +24,7 @@ require (
 
 require (
 	chainguard.dev/go-grpc-kit v0.18.0 // indirect
-	chainguard.dev/sdk v0.1.212 // indirect
+	chainguard.dev/sdk v0.1.213 // indirect
 	cloud.google.com/go/auth v0.23.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
