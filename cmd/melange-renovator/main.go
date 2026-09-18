@@ -2,17 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
-	"unicode"
 
 	"github.com/chainguard-dev/clog"
-	renovator "github.com/d4rkfella/melange-renovator/internal/renovator"
+	"github.com/d4rkfella/melange-renovator/internal/app"
+	"github.com/d4rkfella/melange-renovator/internal/report"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -27,15 +29,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := run(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// run builds the command tree and executes it. All process-exit decisions
+// live in main; everything below this point returns errors normally.
+func run(ctx context.Context) error {
 	v := viper.New()
 	v.SetEnvPrefix("RENOVATE")
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-	rootCmd := newRootCommand(ctx, v)
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+
+	return newRootCommand(ctx, v).Execute()
 }
 
 func newRootCommand(ctx context.Context, v *viper.Viper) *cobra.Command {
@@ -46,35 +54,30 @@ func newRootCommand(ctx context.Context, v *viper.Viper) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var logLevel slog.Level
-			if err := logLevel.UnmarshalText([]byte(v.GetString("log-level"))); err != nil {
-				logLevel = slog.LevelInfo
-			}
+			ctx, log := setupLogger(ctx, v.GetString("log-level"))
 
-			logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
-			ctx := clog.WithLogger(ctx, logger)
-			log := clog.FromContext(ctx)
+			log.Info("starting melange-renovator", "version", version, "commit", commitSHA, "build_date", buildDate)
+			log.Info("runtime environment", "GOOS", runtime.GOOS, "GOARCH", runtime.GOARCH, "GoVersion", runtime.Version())
 
-			log.Info("Starting melange-renovator",
-				"version", version,
-				"commit", commitSHA,
-				"build_date", buildDate,
-			)
-			log.Info("Runtime Environment",
-				"GOOS", runtime.GOOS,
-				"GOARCH", runtime.GOARCH,
-				"GoVersion", runtime.Version(),
-			)
-
-			if err := validateAndGetToken(v); err != nil {
-				log.Error("Token validation failed", "error", err)
+			opts := optionsFromViper(v)
+			if err := opts.Validate(); err != nil {
 				return err
 			}
 
-			renovator.RunContext(ctx, newOptionsFromViper(v))
-			return nil
+			runner, cleanup, err := newRunner(ctx, opts)
+			if err != nil {
+				return fmt.Errorf("initializing: %w", err)
+			}
+			defer cleanup()
+
+			rep, err := runner.Run(ctx)
+			if err != nil {
+				return err
+			}
+			return printReport(rep)
 		},
 	}
+
 	rootCmd.Flags().Bool("autodiscover", false, "Discover repositories via the GitHub App installation instead of relying on a pre-checked-out repo")
 	rootCmd.Flags().StringSlice("autodiscover-filter", nil, "Glob pattern(s) (owner/repo) to filter autodiscovered repositories")
 	rootCmd.Flags().String("base-dir", "/tmp/renovate", "Base directory for repo clones and cache")
@@ -87,6 +90,7 @@ func newRootCommand(ctx context.Context, v *viper.Viper) *cobra.Command {
 	rootCmd.Flags().String("aws-secret-key", "", "AWS secret access key")
 	rootCmd.Flags().String("aws-endpoint", "", "Custom S3 endpoint URL")
 	rootCmd.Flags().String("token", "", "GitHub token for API access")
+	rootCmd.Flags().String("dependency-dashboard-title", "Renovate Dashboard", "Title of the dependency dashboard issue")
 	rootCmd.Flags().String("rebase-when", "auto", "Rebase strategy for PRs (options: 'auto', 'behind-base-branch', 'conflicted', 'never')")
 	rootCmd.Flags().String("recreate-when", "auto", "Recreate strategy for closed PRs (options: 'auto', 'always', 'never')")
 	rootCmd.Flags().StringSlice("config-file-patterns", []string{`\.ya?ml$`}, "Regex patterns used to discover melange configuration files")
@@ -99,59 +103,51 @@ func newRootCommand(ctx context.Context, v *viper.Viper) *cobra.Command {
 	return rootCmd
 }
 
-// TokenValidationError is a custom error type for token validation errors.
-type TokenValidationError struct {
-	Message string
-}
-
-func (e TokenValidationError) Error() string {
-	return e.Message
-}
-
-func validateAndGetToken(v *viper.Viper) error {
-	token := v.GetString("token")
-
-	if token == "" {
-		return TokenValidationError{
-			Message: "'token' MUST be passed using the --token flag or the 'RENOVATE_TOKEN' environment variable",
-		}
+func setupLogger(ctx context.Context, levelStr string) (context.Context, *clog.Logger) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(levelStr)); err != nil {
+		level = slog.LevelInfo
 	}
-
-	if containsWhitespace(token) {
-		return TokenValidationError{
-			Message: "Token MUST NOT contain whitespace",
-		}
-	}
-
-	return nil
+	logger := clog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	return clog.WithLogger(ctx, logger), logger
 }
 
-func containsWhitespace(s string) bool {
-	for _, r := range s {
-		if unicode.IsSpace(r) {
-			return true
-		}
-	}
-	return false
-}
-
-func newOptionsFromViper(v *viper.Viper) renovator.Options {
-	return renovator.Options{
+func optionsFromViper(v *viper.Viper) app.Options {
+	return app.Options{
 		Autodiscover:       v.GetBool("autodiscover"),
 		AutodiscoverFilter: v.GetStringSlice("autodiscover-filter"),
 		BaseDir:            v.GetString("base-dir"),
-		LogLevel:           v.GetString("log-level"),
 		DryRun:             v.GetBool("dry-run"),
+		DashboardTitle:     v.GetString("dependency-dashboard-title"),
 		Concurrency:        v.GetInt("concurrency"),
-		S3Bucket:           v.GetString("s3-bucket"),
-		AWSRegion:          v.GetString("aws-region"),
-		AWSAccessKey:       v.GetString("aws-access-key"),
-		AWSSecretKey:       v.GetString("aws-secret-key"),
-		AWSEndpoint:        v.GetString("aws-endpoint"),
 		Token:              v.GetString("token"),
-		RebaseWhen:         v.GetString("rebase-when"),
-		RecreateWhen:       v.GetString("recreate-when"),
+		RebaseWhen:         app.RebasePolicy(v.GetString("rebase-when")),
+		RecreateWhen:       app.RecreatePolicy(v.GetString("recreate-when")),
 		ConfigFilePatterns: v.GetStringSlice("config-file-patterns"),
 		IgnorePaths:        v.GetStringSlice("ignore-paths"),
+		AWS: app.AWSOptions{
+			Bucket:    v.GetString("s3-bucket"),
+			Region:    v.GetString("aws-region"),
+			AccessKey: v.GetString("aws-access-key"),
+			SecretKey: v.GetString("aws-secret-key"),
+			Endpoint:  v.GetString("aws-endpoint"),
+		},
 	}
+}
+
+func printReport(rep app.Report) error {
+	var packages []report.PackageFile
+	for _, r := range rep.Repos {
+		packages = append(packages, r.Packages...)
+	}
+	sort.Slice(packages, func(i, j int) bool {
+		return packages[i].PackageFile < packages[j].PackageFile
+	})
+
+	data, err := json.MarshalIndent(packages, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling report: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
 }
