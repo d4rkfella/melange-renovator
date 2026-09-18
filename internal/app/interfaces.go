@@ -69,14 +69,8 @@ type IdentityResolver interface {
 
 // DashboardManager owns the "Renovate Dashboard" issue lifecycle for a repo.
 type DashboardManager interface {
-	// Read returns any manual actions requested via dashboard checkboxes
-	// since the last run, plus the issue body as it stood at the start of
-	// this run (used later to preserve mid-run checkbox changes).
-	Read(ctx context.Context, repo repo.Identifier, title, bot string) (actions dashboard.Actions, startBody string, err error)
-
-	// Reconcile creates, updates, or closes the dashboard issue based on
-	// this run's final report.
-	Reconcile(ctx context.Context, repo repo.Identifier, title, bot string, packages []report.PackageFile, startBody string) error
+	FindOpen(ctx context.Context, repo repo.Identifier, title, bot string) (*dashboard.Issue, error)
+	Reconcile(ctx context.Context, repo repo.Identifier, title, bot string, packages []report.PackageFile, existing *dashboard.Issue) error
 }
 
 // RepoContext carries the per-run, per-repository facts every package's

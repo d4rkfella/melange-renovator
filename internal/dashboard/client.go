@@ -17,7 +17,7 @@ func (c GitHubIssueClient) ListIssues(ctx context.Context, owner, repo, state st
 		State: state,
 		ListOptions: github.ListOptions{
 			Page:    page,
-			PerPage: 100, // Query maximum allowable page size
+			PerPage: 100,
 		},
 	}
 
@@ -28,7 +28,6 @@ func (c GitHubIssueClient) ListIssues(ctx context.Context, owner, repo, state st
 
 	out := make([]Issue, 0, len(ghIssues))
 	for _, iss := range ghIssues {
-		// Ignore Pull Requests returned by GitHub Issues API
 		if iss.IsPullRequest() {
 			continue
 		}
@@ -45,18 +44,25 @@ func (c GitHubIssueClient) ListIssues(ctx context.Context, owner, repo, state st
 }
 
 func (c GitHubIssueClient) CreateIssue(ctx context.Context, owner, repo, title, body string) error {
-	_, _, err := c.GH.Issues.Create(ctx, owner, repo, &github.IssueRequest{Title: new(title), Body: new(body)})
+	req := &github.IssueRequest{
+		Title: new(title),
+		Body:  new(body),
+	}
+	_, _, err := c.GH.Issues.Create(ctx, owner, repo, req)
 	return err
 }
 
-func (c GitHubIssueClient) EditIssue(ctx context.Context, owner, repo string, number int, body, state *string) error {
-	_, _, err := c.GH.Issues.Edit(ctx, owner, repo, number, &github.IssueRequest{Body: body, State: state})
+func (c GitHubIssueClient) EditIssue(ctx context.Context, owner, repo string, number int, title, body, state *string) error {
+	req := &github.IssueRequest{
+		Title: title,
+		Body:  body,
+		State: state,
+	}
+	_, _, err := c.GH.Issues.Edit(ctx, owner, repo, number, req)
 	return err
 }
 
-// DryRunIssueClient reads through to a real IssueClient but logs instead of
-// writing, matching the same live-reads/stubbed-writes convention used by
-// ghrepo's dry-run Client.
+// DryRunIssueClient logs instead of writing.
 type DryRunIssueClient struct {
 	IssueClient
 }
@@ -66,7 +72,11 @@ func (c DryRunIssueClient) CreateIssue(ctx context.Context, owner, repo, title, 
 	return nil
 }
 
-func (c DryRunIssueClient) EditIssue(ctx context.Context, owner, repo string, number int, _, _ *string) error {
-	clog.FromContext(ctx).Info("DRY RUN: would edit dashboard issue", "repo", owner+"/"+repo, "number", number)
+func (c DryRunIssueClient) EditIssue(ctx context.Context, owner, repo string, number int, title, _, _ *string) error {
+	tStr := ""
+	if title != nil {
+		tStr = *title
+	}
+	clog.FromContext(ctx).Info("DRY RUN: would edit dashboard issue", "repo", owner+"/"+repo, "number", number, "title", tStr)
 	return nil
 }

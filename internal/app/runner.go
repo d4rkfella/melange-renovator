@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/chainguard-dev/clog"
+	"github.com/d4rkfella/melange-renovator/internal/dashboard"
 	"github.com/d4rkfella/melange-renovator/internal/repo"
 	"github.com/d4rkfella/melange-renovator/internal/report"
 	"golang.org/x/sync/errgroup"
@@ -148,9 +149,15 @@ func (r *Runner) runRepo(ctx context.Context, repo repo.Identifier, rootDir, bot
 		defaultBranch = "main"
 	}
 
-	actions, startBody, err := r.Dashboard.Read(ctx, repo, dashboardTitle, bot)
+	existingIssue, err := r.Dashboard.FindOpen(ctx, repo, dashboardTitle, bot)
 	if err != nil {
-		log.Warn("failed to read dependency dashboard, proceeding without manual actions", "error", err)
+		log.Warn("failed to fetch dependency dashboard issue", "error", err)
+	}
+
+	// 2. Parse actions if an issue exists
+	var actions dashboard.Actions
+	if existingIssue != nil {
+		actions = dashboard.ParseActions(existingIssue.Body)
 	}
 
 	rc := RepoContext{
@@ -196,7 +203,7 @@ func (r *Runner) runRepo(ctx context.Context, repo repo.Identifier, rootDir, bot
 	}
 	log.Info("finished processing repository", "total", len(files), "succeeded", succeeded, "failed", failed)
 
-	if err := r.Dashboard.Reconcile(ctx, repo, dashboardTitle, bot, packages, startBody); err != nil {
+	if err := r.Dashboard.Reconcile(ctx, repo, dashboardTitle, bot, packages, existingIssue); err != nil {
 		log.Warn("failed to update dependency dashboard", "error", err)
 	}
 

@@ -22,25 +22,30 @@ type Issue struct {
 	Author string
 }
 
-// IssueClient interface with pagination support.
+// IssueClient interface with title, body, and state update support.
 type IssueClient interface {
 	ListIssues(ctx context.Context, owner, repo, state string, page int) ([]Issue, error)
 	CreateIssue(ctx context.Context, owner, repo, title, body string) error
-	EditIssue(ctx context.Context, owner, repo string, number int, body, state *string) error
+	EditIssue(ctx context.Context, owner, repo string, number int, title, body, state *string) error
 }
 
 // Manager implements app.DashboardManager.
 type Manager struct {
 	Client    IssueClient
-	AutoClose bool // currently always false in production — see NewManager
+	AutoClose bool
 }
 
-// NewManager builds a Manager with the standard dashboard issue title.
-// AutoClose defaults to false: the original tool always called this with
-// autoclose=false, so a dashboard issue is currently never auto-closed —
-// only ever updated or left as-is. Set it explicitly if that should change.
+// NewManager builds a Manager with the specified IssueClient.
 func NewManager(client IssueClient) *Manager {
 	return &Manager{Client: client}
+}
+
+// ParseActions extracts checkable dashboard actions from raw markdown text.
+func ParseActions(body string) Actions {
+	if body == "" {
+		return Actions{}
+	}
+	return parseDashboardBody(body)
 }
 
 func isDashboardIssue(iss Issue, targetTitle, botLogin string) bool {
@@ -54,7 +59,6 @@ func isDashboardIssue(iss Issue, targetTitle, botLogin string) bool {
 	return iss.Title == targetTitle
 }
 
-// listAllIssues pages through GitHub API results (100 per page) to prevent missing issues.
 func (m *Manager) listAllIssues(ctx context.Context, owner, repoName, state string) ([]Issue, error) {
 	var allIssues []Issue
 	page := 1
@@ -78,81 +82,71 @@ func (m *Manager) listAllIssues(ctx context.Context, owner, repoName, state stri
 	return allIssues, nil
 }
 
-func (m *Manager) Read(ctx context.Context, repo repo.Identifier, title, bot string) (Actions, string, error) {
+// FindOpen queries open repository issues to locate an active dashboard issue handle.
+func (m *Manager) FindOpen(ctx context.Context, repo repo.Identifier, title, bot string) (*Issue, error) {
 	issues, err := m.listAllIssues(ctx, repo.Owner, repo.Name, "open")
 	if err != nil {
-		return Actions{}, "", fmt.Errorf("listing open dashboard issues: %w", err)
+		return nil, fmt.Errorf("listing open dashboard issues: %w", err)
 	}
 
 	for _, iss := range issues {
 		if isDashboardIssue(iss, title, bot) {
-			return parseDashboardBody(iss.Body), iss.Body, nil
+			return &iss, nil
 		}
 	}
-	return Actions{}, "", nil
+	return nil, nil
 }
 
-func (m *Manager) Reconcile(ctx context.Context, repo repo.Identifier, title, bot string, packages []report.PackageFile, startBody string) error {
+// Reconcile creates, updates, renames, or closes the dashboard issue.
+func (m *Manager) Reconcile(ctx context.Context, repo repo.Identifier, title, bot string, packages []report.PackageFile, existing *Issue) error {
 	log := clog.FromContext(ctx)
 	hasErrors, hasOpenPRs, hasBlocked := summarize(packages)
 
-	all, err := m.listAllIssues(ctx, repo.Owner, repo.Name, "all")
-	if err != nil {
-		return fmt.Errorf("listing all issues: %w", err)
-	}
-
-	var matching []Issue
-	for _, iss := range all {
-		if isDashboardIssue(iss, title, bot) {
-			matching = append(matching, iss)
+	// Fallback pass: If no open issue handle was found during FindOpen, check closed issues.
+	if existing == nil {
+		closedIssues, err := m.listAllIssues(ctx, repo.Owner, repo.Name, "closed")
+		if err == nil {
+			for i := range closedIssues {
+				iss := closedIssues[i]
+				if isDashboardIssue(iss, title, bot) {
+					if existing == nil || iss.Number > existing.Number {
+						existing = &iss
+					}
+				}
+			}
 		}
 	}
 
 	closed := "closed"
-	var existing *Issue
-
-	// If multiple open dashboard issues exist (e.g. created by old un-paginated bug), keep 1 open and close duplicate(s).
-	for i := range matching {
-		iss := matching[i]
-		if iss.State != "open" {
-			continue
-		}
-		if existing == nil {
-			existing = &iss
-			continue
-		}
-		if err := m.Client.EditIssue(ctx, repo.Owner, repo.Name, iss.Number, nil, &closed); err != nil {
-			log.Warn("failed to close duplicate dashboard issue", "number", iss.Number, "error", err)
-		}
-	}
-
-	if existing == nil {
-		for i := range matching {
-			iss := matching[i]
-			if existing == nil || iss.Number > existing.Number {
-				existing = &iss
-			}
-		}
-	}
 
 	if m.AutoClose && !hasErrors && !hasOpenPRs && !hasBlocked {
 		if existing == nil || existing.State == "closed" {
 			return nil
 		}
-		return m.Client.EditIssue(ctx, repo.Owner, repo.Name, existing.Number, nil, &closed)
+		return m.Client.EditIssue(ctx, repo.Owner, repo.Name, existing.Number, nil, nil, &closed)
 	}
 
 	if existing == nil && !hasErrors && !hasOpenPRs && !hasBlocked {
 		return nil
 	}
 
-	// Always append marker to ensure continuous recognition even if issue title changes
 	freshBody := renderBody(packages) + "\n\n" + DashboardMarker
 
-	if existing != nil && existing.State == "open" && freshBody == startBody {
+	var titlePtr *string
+	if existing != nil && existing.Title != title {
+		titlePtr = &title
+	}
+
+	startBody := ""
+	if existing != nil {
+		startBody = existing.Body
+	}
+
+	if existing != nil && existing.State == "open" && freshBody == startBody && titlePtr == nil {
 		log.Debug("no changes to dependency dashboard issue needed")
 		return nil
 	}
+
 	if existing != nil {
 		freshBody = preserveMidRunChecks(freshBody, existing.Body, startBody)
 	}
@@ -166,5 +160,6 @@ func (m *Manager) Reconcile(ctx context.Context, repo repo.Identifier, title, bo
 		open := "open"
 		reopen = &open
 	}
-	return m.Client.EditIssue(ctx, repo.Owner, repo.Name, existing.Number, &freshBody, reopen)
+
+	return m.Client.EditIssue(ctx, repo.Owner, repo.Name, existing.Number, titlePtr, &freshBody, reopen)
 }
