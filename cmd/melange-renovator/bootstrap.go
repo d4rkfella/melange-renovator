@@ -64,14 +64,15 @@ func newRunner(ctx context.Context, opts app.Options) (runner *app.Runner, clean
 	}
 
 	runner = &app.Runner{
-		Discoverer: discover.NewDiscoverer(discover.GitHubInstallationLister{GH: gh}, opts.Token, opts.AutodiscoverFilter),
-		Scanner:    discover.Scanner{},
-		Inspector:  repoInspector{gh: gh},
-		Identity:   identityResolver{gh: gh},
-		Dashboard:  dashboard.NewManager(issueClient),
-		Processor:  proc,
-		Clock:      app.RealClock{},
-		Options:    opts,
+		Discoverer:            discover.NewDiscoverer(discover.GitHubInstallationLister{GH: gh}, opts.Token, opts.AutodiscoverFilter),
+		Scanner:               discover.Scanner{},
+		Inspector:             repoInspector{gh: gh},
+		Identity:              identityResolver{gh: gh},
+		Dashboard:             dashboard.NewManager(issueClient),
+		Processor:             proc,
+		RenovatorConfigLoader: discover.RenovatorConfigLoader{},
+		Clock:                 app.RealClock{},
+		Options:               opts,
 	}
 	return runner, releaseCleanup, nil
 }
