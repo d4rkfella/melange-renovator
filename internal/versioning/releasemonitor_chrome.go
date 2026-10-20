@@ -1,4 +1,3 @@
-// internal/versioning/releasemonitor_chrome.go
 package versioning
 
 import (
@@ -51,12 +50,9 @@ func NewChromeReleaseFetcher(ctx context.Context, token string) (fetcher Release
 	return &chromeReleaseFetcher{browserCtx: browserCtx, token: token}, cleanup
 }
 
-// ensureStarted actually launches Chrome, exactly once, on whichever
-// goroutine's FetchProject call gets there first — subsequent and
-// concurrent callers just wait on the same result via sync.Once.
 func (f *chromeReleaseFetcher) ensureStarted() error {
 	f.startOnce.Do(func() {
-		f.startErr = chromedp.Run(f.browserCtx) // no actions: forces the browser + first tab to actually launch
+		f.startErr = chromedp.Do(f.browserCtx)
 	})
 	return f.startErr
 }
@@ -67,37 +63,73 @@ func (f *chromeReleaseFetcher) FetchProject(ctx context.Context, projectID int) 
 	}
 
 	log := clog.FromContext(ctx)
-	url := fmt.Sprintf("https://release-monitoring.org/api/v2/versions/?project_id=%d", projectID)
+	url := fmt.Sprintf(
+		"https://release-monitoring.org/api/v2/versions/?project_id=%d",
+		projectID,
+	)
 
-	tabCtx, cancel := chromedp.NewContext(f.browserCtx) // safe now: f.browserCtx's Browser is guaranteed resolved
-	defer cancel()
-	tabCtx, cancel = context.WithTimeout(tabCtx, 90*time.Second)
-	defer cancel()
+	tabCtx, cancelTab := chromedp.NewContext(f.browserCtx)
+	defer cancelTab()
 
-	headers := map[string]any{"Authorization": "Bearer " + f.token, "Accept": "application/json"}
+	tabCtx, cancelTimeout := context.WithTimeout(tabCtx, 90*time.Second)
+	defer cancelTimeout()
 
-	var jsonBody string
-	err := chromedp.Run(tabCtx,
-		network.Enable(),
-		network.SetExtraHTTPHeaders(network.Headers(headers)),
+	headers := map[string]any{
+		"Authorization": "Bearer " + f.token,
+		"Accept":        "application/json",
+	}
+
+	// Run protocol commands using the new typed API.
+	if _, err := chromedp.Call(
+		tabCtx,
+		network.Enable,
+		network.EnableParams{},
+	); err != nil {
+		return ReleaseProject{}, fmt.Errorf("enabling network: %w", err)
+	}
+
+	if _, err := chromedp.Call(
+		tabCtx,
+		network.SetExtraHTTPHeaders,
+		network.SetExtraHTTPHeadersParams{
+			Headers: network.Headers(headers),
+		},
+	); err != nil {
+		return ReleaseProject{}, fmt.Errorf("setting HTTP headers: %w", err)
+	}
+
+	if err := chromedp.Do(tabCtx,
 		chromedp.Navigate(url),
 		chromedp.Sleep(15*time.Second),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
-		chromedp.Evaluate(`document.body.innerText`, &jsonBody),
-	)
-	if err != nil {
+		chromedp.WaitVisible(chromedp.CSS("body")),
+	); err != nil {
 		return ReleaseProject{}, fmt.Errorf("failed to fetch: %w", err)
 	}
 
+	// Evaluate now returns its value rather than filling a pointer.
+	jsonBody, err := chromedp.Run(
+		tabCtx,
+		chromedp.Evaluate[string](`document.body.innerText`),
+	)
+	if err != nil {
+		return ReleaseProject{}, fmt.Errorf("reading response body: %w", err)
+	}
+
 	log.Debug("previewing response", "response_preview", truncate(jsonBody, 200))
-	if strings.Contains(jsonBody, "Access Denied") || strings.Contains(jsonBody, "Making sure you're not a bot") {
-		return ReleaseProject{}, fmt.Errorf("blocked by Anubis: %s", truncate(jsonBody, 100))
+
+	if strings.Contains(jsonBody, "Access Denied") ||
+		strings.Contains(jsonBody, "Making sure you're not a bot") {
+		return ReleaseProject{}, fmt.Errorf(
+			"blocked by Anubis: %s",
+			truncate(jsonBody, 100),
+		)
 	}
 
 	var project ReleaseProject
 	if err := json.Unmarshal([]byte(jsonBody), &project); err != nil {
 		return ReleaseProject{}, fmt.Errorf("failed to decode response body: %w", err)
 	}
+
 	return project, nil
 }
 

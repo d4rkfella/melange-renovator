@@ -1,4 +1,3 @@
-// internal/versioning/git_remote.go
 package versioning
 
 import (
