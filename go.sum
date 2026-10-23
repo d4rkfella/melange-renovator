@@ -73,8 +73,8 @@ github.com/chainguard-dev/clog v1.8.1 h1:Lab3GEDsVm1J9XGlpWEBuzXX7eETRmd0vN5PYoN
 github.com/chainguard-dev/clog v1.8.1/go.mod h1:5MQOZi+Iu7fV7GcJG8ag8rCB5elEOpqRMKEASgnGVdo=
 github.com/chainguard-dev/yam v0.2.69 h1:J/Jo5QX4miGHdDK2RfZDpNvL9lKFWnldtVggbLiu4/g=
 github.com/chainguard-dev/yam v0.2.69/go.mod h1:k252QbClUkNnmdlrFpAlBoSz+C7ZV0GJX6gIIFfHp3w=
-github.com/chromedp/cdproto v0.158.2 h1:EIrQ/1Ns6+WEmaK23ynKbWm+kMV1IeG5hd8zyOLSMXs=
-github.com/chromedp/cdproto v0.158.2/go.mod h1:h68JaIuFr9o3yiayxEYhBdvaxgYO3shDrPSYhNlyfu0=
+github.com/chromedp/cdproto v0.158.3 h1:vLLW+mou2kaaol1Z7E5hFhoqFoEDMJYic/7lG8FsIhI=
+github.com/chromedp/cdproto v0.158.3/go.mod h1:h68JaIuFr9o3yiayxEYhBdvaxgYO3shDrPSYhNlyfu0=
 github.com/chromedp/chromedp v0.21.0 h1:nVHgS2LHyhZJ1l3BWRbG2eFIFYiJMnvkJbELbd8WBoQ=
 github.com/chromedp/chromedp v0.21.0/go.mod h1:6z1Y5FdKUxRzxx2qcC5h1xjaBJrSWrZp1mjgITfNZig=
 github.com/cloudflare/circl v1.6.5 h1:O64F26HEqNhznd/hrC5KZXVKYuKM2rx4deZDTc4ihQA=
