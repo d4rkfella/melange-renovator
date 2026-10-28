@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/aws/smithy-go v1.28.6
-	github.com/bmatcuk/doublestar/v4 v4.10.3
+	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/chainguard-dev/clog v1.8.1
 	github.com/chromedp/cdproto v0.158.4
 	github.com/chromedp/chromedp v0.21.0
