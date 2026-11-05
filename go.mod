@@ -13,7 +13,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/chainguard-dev/clog v1.8.1
 	github.com/chromedp/cdproto v0.159.0
-	github.com/chromedp/chromedp v0.21.0
+	github.com/chromedp/chromedp v0.21.1
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/google/go-containerregistry v0.22.1
 	github.com/google/go-github/v81 v81.0.0
