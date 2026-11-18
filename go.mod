@@ -12,7 +12,7 @@ require (
 	github.com/aws/smithy-go v1.28.9
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chromedp/cdproto v0.160.1
+	github.com/chromedp/cdproto v0.160.2
 	github.com/chromedp/chromedp v0.23.1
 	github.com/go-git/go-git/v5 v5.19.3
 	github.com/google/go-containerregistry v0.22.1
